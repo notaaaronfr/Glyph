@@ -27,10 +27,12 @@ src/
   codegen.rs   native compiler: syntax tree → C
   runtime.c    small C runtime embedded in every native executable
   error.rs     diagnostics (human-readable and JSON)
+  fix.rs       `glyph fix`: AI repair loop, its guard rails, and the Claude API client
   main.rs      command-line interface
 tests/
   cases/       snapshot tests: *.gly programs and their *.expected output
   cases.rs     the test harness
+  fix/         a broken program, an honest fix and "cheating" fixes for the guard tests
 examples/      example programs
 ```
 

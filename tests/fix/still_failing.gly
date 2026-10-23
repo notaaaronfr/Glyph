@@ -1,0 +1,11 @@
+# Not a fix: it compiles and follows the rules, but the test still fails.
+fn discount(price: Int, percent: Int) -> Int
+  requires percent >= 0 and percent <= 100
+  ensures result <= price
+{
+  return price - percent
+}
+
+test "half price" {
+  assert discount(200, 50) == 100
+}

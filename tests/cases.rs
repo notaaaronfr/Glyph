@@ -88,3 +88,63 @@ fn effects_report_lists_capabilities() {
     assert!(out.contains("deposit              pure"), "{}", out);
     assert!(out.contains("report               io"), "{}", out);
 }
+
+/// `glyph fix --candidate` verifies a proposed fix offline, with no model involved.
+fn fix_with(candidate: &str) -> String {
+    glyph(&[
+        "fix",
+        "tests/fix/broken.gly",
+        "--candidate",
+        &format!("tests/fix/{}.gly", candidate),
+    ])
+}
+
+#[test]
+fn fix_accepts_an_honest_fix() {
+    let out = fix_with("good");
+    assert!(out.starts_with("exit: 0"), "{}", out);
+    assert!(
+        out.contains("+   return price - price * percent / 100"),
+        "{}",
+        out
+    );
+}
+
+#[test]
+fn fix_rejects_new_effects() {
+    let out = fix_with("cheat_effect");
+    assert!(out.starts_with("exit: 1"), "{}", out);
+    assert!(out.contains("`discount` now declares `uses fs`"), "{}", out);
+}
+
+#[test]
+fn fix_rejects_weakened_contracts() {
+    let out = fix_with("cheat_contract");
+    assert!(out.starts_with("exit: 1"), "{}", out);
+    assert!(
+        out.contains("contract `ensures result <= price` of `discount` was removed"),
+        "{}",
+        out
+    );
+}
+
+#[test]
+fn fix_rejects_edited_tests() {
+    let out = fix_with("cheat_test");
+    assert!(out.starts_with("exit: 1"), "{}", out);
+    assert!(out.contains("test \"half price\" was changed"), "{}", out);
+}
+
+#[test]
+fn fix_rejects_fixes_that_still_fail() {
+    let out = fix_with("still_failing");
+    assert!(out.starts_with("exit: 1"), "{}", out);
+    assert!(out.contains("left side = 150, right side = 100"), "{}", out);
+}
+
+#[test]
+fn fix_does_nothing_for_a_healthy_file() {
+    let out = glyph(&["fix", "examples/bank.gly"]);
+    assert!(out.starts_with("exit: 0"), "{}", out);
+    assert!(out.contains("nothing to fix"), "{}", out);
+}

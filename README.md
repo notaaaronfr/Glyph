@@ -33,6 +33,7 @@ test "withdraw subtracts" {
 - **Built-in tests.** `test "name" { assert ... }` blocks live next to the code.
 - **Native compiler.** `glyph build` produces a standalone executable that behaves identically to the interpreter, down to the error messages.
 - **Errors for agents.** With `--json`, every diagnostic is a JSON object with the exact values involved, so an AI can fix its own mistakes in a loop.
+- **AI fixes, verified.** `glyph fix` asks Claude to repair errors and failing tests, and accepts a fix only if Glyph can verify it. [More below](#glyph-fix-ai-proposes-glyph-proves).
 
 What an AI mistake looks like in Glyph:
 
@@ -64,7 +65,47 @@ glyph test    examples/bank.gly             # run test blocks
 glyph check   examples/ai_mistakes.gly      # static checks only
 glyph effects examples/bank.gly             # what each function may do
 glyph test    examples/bug.gly --json       # machine-readable results
+glyph fix     examples/bug.gly              # AI-proposed fix, verified by Glyph
 ```
+
+## `glyph fix`: AI proposes, Glyph proves
+
+`glyph fix` sends the problems Glyph found to Claude and checks every proposed fix. A fix is accepted only if it:
+
+1. parses and passes every static check (types, names, effects)
+2. adds **no new effects**: an AI can't "fix" a bug by quietly granting itself file or network access
+3. keeps every `requires` / `ensures` clause and every existing test **unchanged**: it can't delete the check that caught the bug
+4. passes all tests
+
+Rejected proposals go back to the model with the reasons, up to `--tries` times (default 3). The file is only changed with `--write`.
+
+An illustrative session (the model's explanation will vary):
+
+```
+$ glyph fix examples/bug.gly
+glyph fix: 1 problem(s) in examples/bug.gly
+  attempt 1/3: asking claude-opus-5-5 ...
+  attempt 1: verified (types, effects, contracts, tests)
+The discount was added to the price instead of subtracted.
+
+  {
+-   return price + price * percent / 100
++   return price - price * percent / 100
+  }
+
+run again with --write to apply this fix to examples/bug.gly
+```
+
+What the guard says when a proposal cheats:
+
+```
+  attempt 1 rejected:
+    - `discount` now declares `uses fs`, which the original did not allow; a fix may not add effects
+    - the contract `ensures result <= price` of `discount` was removed or changed; a fix may not weaken contracts
+    - test "half price" was changed; a fix may not edit existing tests
+```
+
+`glyph fix` needs `ANTHROPIC_API_KEY`, or a profile from `ant auth login`. Use `--model` to pick another Claude model. `--candidate other.gly` verifies a fix you already have, with no AI involved.
 
 ## Performance
 
@@ -82,7 +123,7 @@ source.gly → lexer → parser → checker (names, types, effects) ─┬→ in
                                                                └→ codegen → C → cc -O2 → executable
 ```
 
-## Language reference (v0.2)
+## Language reference (v0.3)
 
 | Feature | Syntax |
 |---|---|
@@ -105,7 +146,7 @@ Glyph is **early and experimental**: expect breaking changes. Natively compiled 
 - [x] Native compiler with identical behaviour
 - [ ] Records and enums, modules
 - [ ] Memory management for native code
-- [ ] `glyph fix`: AI repair loop. Fixes are accepted only if they type-check, add no new effects, and pass every contract and test
+- [x] `glyph fix`: AI repair loop. Fixes are accepted only if they type-check, add no effects, keep every contract and test, and pass
 - [ ] `uses ai`: model calls as a typed, declared effect
 - [ ] `glyph build --tune`: learned, meaning-preserving optimization
 - [ ] Finer capabilities (`uses net("api.example.com")`), property tests, compile-time contract proofs

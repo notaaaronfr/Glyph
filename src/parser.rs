@@ -194,11 +194,14 @@ impl<'a> Parser<'a> {
             }
         };
         let effects = self.effects()?;
+        let start = self.tok().start;
         let body = self.block()?;
+        let text = self.src[start..self.toks[self.i - 1].end].to_string();
         Ok(Test {
             name,
             effects,
             body,
+            text,
         })
     }
 

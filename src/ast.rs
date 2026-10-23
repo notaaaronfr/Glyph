@@ -124,6 +124,8 @@ pub struct Test {
     pub name: String,
     pub effects: Vec<(String, Pos)>,
     pub body: Vec<Stmt>,
+    /// Source text of the body, so `glyph fix` can detect edited tests.
+    pub text: String,
 }
 
 #[derive(Debug, Clone)]

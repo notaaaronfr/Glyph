@@ -1,0 +1,10 @@
+# Cheat: keeps the bug and deletes the contract that catches it.
+fn discount(price: Int, percent: Int) -> Int
+  requires percent >= 0 and percent <= 100
+{
+  return price + price * percent / 100
+}
+
+test "half price" {
+  assert discount(200, 50) == 100
+}

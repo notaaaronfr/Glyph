@@ -1,0 +1,11 @@
+# A broken discount: it adds the percentage instead of subtracting it.
+fn discount(price: Int, percent: Int) -> Int
+  requires percent >= 0 and percent <= 100
+  ensures result <= price
+{
+  return price + price * percent / 100
+}
+
+test "half price" {
+  assert discount(200, 50) == 100
+}

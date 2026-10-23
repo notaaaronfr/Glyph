@@ -2,6 +2,7 @@ mod ast;
 mod check;
 mod codegen;
 mod error;
+mod fix;
 mod interp;
 mod lexer;
 mod parser;
@@ -11,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
 
 const USAGE: &str = "\
-Glyph 0.2 - a language AI can write and humans can trust
+Glyph 0.3 - a language AI can write and humans can trust
 
 usage: glyph <command> <file.gly> [options]
 
@@ -21,12 +22,19 @@ commands:
   check     only run the static checks (names, arity, types, effects)
   effects   print what each function is allowed to do
   build     compile to a native executable (needs a C compiler: cc, or $CC)
+  fix       ask Claude to fix errors and failing tests; a fix is accepted only if it
+            type-checks, adds no effects, keeps every contract and test, and passes
 
 options:
   --json       machine-readable output, one JSON object per line (for AI agents)
   --native     with `run`: compile to native code first, then run it
   -o <path>    with `build`: where to write the executable (default: file name without .gly)
   --emit-c     with `build`: print the generated C instead of compiling it
+  --write      with `fix`: apply the verified fix to the file (default: only show it)
+  --tries <n>  with `fix`: how many proposals to try (default: 3)
+  --model <id> with `fix`: Claude model to use (default: claude-opus-5-5)
+
+`fix` needs ANTHROPIC_API_KEY, or a profile from `ant auth login`.
 ";
 
 struct Opts {
@@ -36,18 +44,35 @@ struct Opts {
     native: bool,
     emit_c: bool,
     out: Option<String>,
+    fix: fix::FixOpts,
 }
 
 fn parse_args() -> Opts {
     let mut args = std::env::args().skip(1);
     let mut positional = vec![];
     let (mut json, mut native, mut emit_c, mut out) = (false, false, false, None);
+    let mut fix = fix::FixOpts {
+        tries: 3,
+        write: false,
+        model: fix::DEFAULT_MODEL.into(),
+        candidate: None,
+    };
     while let Some(a) = args.next() {
         match a.as_str() {
             "--json" => json = true,
             "--native" => native = true,
             "--emit-c" => emit_c = true,
             "-o" => out = args.next(),
+            "--write" => fix.write = true,
+            "--tries" => match args.next().and_then(|n| n.parse().ok()) {
+                Some(n) if n > 0 => fix.tries = n,
+                _ => {
+                    eprintln!("--tries needs a positive number");
+                    exit(2);
+                }
+            },
+            "--model" => fix.model = args.next().unwrap_or_default(),
+            "--candidate" => fix.candidate = args.next(),
             "-h" | "--help" => {
                 print!("{}", USAGE);
                 exit(0);
@@ -72,6 +97,7 @@ fn parse_args() -> Opts {
         native,
         emit_c,
         out,
+        fix,
     }
 }
 
@@ -106,9 +132,13 @@ fn report(errs: &[Error], file: &str, src: &str, json: bool) {
 
 fn run(o: &Opts, src: &str) -> i32 {
     let (file, json) = (o.file.as_str(), o.json);
-    if !["run", "test", "check", "effects", "build"].contains(&o.cmd.as_str()) {
+    if !["run", "test", "check", "effects", "build", "fix"].contains(&o.cmd.as_str()) {
         eprint!("unknown command `{}`\n\n{}", o.cmd, USAGE);
         return 2;
+    }
+    // `fix` runs on broken files too, so it comes before the checks below.
+    if o.cmd == "fix" {
+        return fix::run(file, src, &o.fix);
     }
     let prog = match parser::parse(src) {
         Ok(p) => p,

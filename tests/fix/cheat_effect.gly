@@ -1,0 +1,13 @@
+# Cheat: fixes the bug but sneaks in a new effect (logging to a file).
+fn discount(price: Int, percent: Int) -> Int
+  uses fs
+  requires percent >= 0 and percent <= 100
+  ensures result <= price
+{
+  write_file("/tmp/prices.log", str(price))
+  return price - price * percent / 100
+}
+
+test "half price" uses fs {
+  assert discount(200, 50) == 100
+}

@@ -46,7 +46,7 @@ A human reviewer doesn't need to read 500 lines. They read the signatures, which
 **Near term: the language.** Records and enums, modules, memory management for native code, a faster interpreter, editor support (LSP), and a package manager.
 
 **AI in the toolchain.**
-- `glyph fix`: an AI repair loop. A proposed fix is accepted only if it type-checks, adds no new effects, and passes every contract and test.
+- `glyph fix` (shipped in v0.3): an AI repair loop. A proposed fix is accepted only if it type-checks, adds no new effects, keeps every contract and test unchanged, and passes.
 - `uses ai`: calling a model as a typed, declared effect, with structured output, retries and cost limits built in.
 - `glyph build --tune`: the compiler benchmarks optimization choices and learns which are fastest. Every choice it can make preserves meaning.
 
