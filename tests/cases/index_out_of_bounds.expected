@@ -1,0 +1,6 @@
+exit: 1
+--- stdout ---
+--- stderr ---
+tests/cases/index_out_of_bounds.gly:4:9: runtime error: index 5 out of bounds (length 2)
+4 |   print(xs[5])
+  |         ^

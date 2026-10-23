@@ -1,0 +1,5 @@
+# Integer overflow is an error, never a silent wrap-around.
+fn main() uses io {
+  let x = 9223372036854775807
+  print(x + 1)
+}

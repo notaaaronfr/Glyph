@@ -1,0 +1,5 @@
+# Out-of-bounds indexing is reported with the length.
+fn main() uses io {
+  let xs = [1, 2]
+  print(xs[5])
+}

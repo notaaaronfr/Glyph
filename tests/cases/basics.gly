@@ -1,0 +1,40 @@
+# Core features: recursion, control flow, lists with value semantics, strings, contracts.
+fn fib(n: Int) -> Int
+  requires n >= 0
+{
+  if n < 2 { return n }
+  return fib(n - 1) + fib(n - 2)
+}
+
+fn grade(x: Int) -> Str {
+  if x >= 90 { return "A" } else if x >= 80 { return "B" } else { return "C" }
+}
+
+fn safe_div(a: Int, b: Int) -> Int
+  requires b != 0
+{
+  return a / b
+}
+
+fn main() uses io {
+  print(fib(20), grade(85), grade(95), grade(10))
+  let i = 0
+  let xs: List[Int] = []
+  while i < 5 {
+    xs = push(xs, i * i)
+    i = i + 1
+  }
+  let ys = push(xs, 99)
+  let zs = push(xs, 77)
+  print(xs, ys, zs, xs == [0, 1, 4, 9, 16], ys != zs)
+  print(len("héllo"), "héllo"[1], split("a,,b", ","), join([1, 2], "-"), [["a"], ["b\"q"]])
+  print(not true or false, -3 % 2, contains(xs, 16), contains("hello", "ell"), int(" -42 "))
+  for c in "hé!" { print(c) }
+  let n = 0
+  for k in range(3, 6) { n = n + k }
+  print(n, "abc" < "abd", [1] + [2, 3], abs(-5), str([true, false]))
+  let x = 1
+  let x = x + 1
+  print(x, i > 3 and xs[4] == 16, i > 100 and xs[100] == 0)
+  print(safe_div(10, 0))
+}

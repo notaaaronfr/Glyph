@@ -1,0 +1,22 @@
+# Mistakes an AI might make. `glyph check` catches all of them before anything runs.
+
+# Should be pure, but quietly writes to disk.
+fn tax(amount: Int) -> Int {
+  write_file("/tmp/log.txt", str(amount))
+  return amount / 10
+}
+
+# Calls a function that prints, without admitting it.
+fn summary(x: Int) -> Str {
+  report(x)
+  return "done"
+}
+
+fn report(x: Int) uses io {
+  print(x)
+}
+
+fn main() uses io {
+  print(tax(100))
+  print(totl)
+}

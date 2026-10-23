@@ -1,0 +1,612 @@
+//! Tree-walking interpreter. Checks types at function boundaries and
+//! evaluates `requires` / `ensures` on every call.
+
+use crate::ast::*;
+use crate::error::{Error, Pos};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::fmt;
+use std::io::Write;
+use std::rc::Rc;
+
+/// A list with value semantics, built the same way as the native runtime's lists.
+/// Several lists may share one buffer: each sees only its first `len` items, and
+/// items are never overwritten, so the list ending at the buffer's tip can be
+/// extended in place. That makes `xs = push(xs, v)` O(1) instead of a full copy.
+#[derive(Debug, Clone)]
+pub struct ListVal {
+    buf: Rc<RefCell<Vec<Value>>>,
+    len: usize,
+}
+
+impl ListVal {
+    pub fn new(items: Vec<Value>) -> Self {
+        let len = items.len();
+        ListVal {
+            buf: Rc::new(RefCell::new(items)),
+            len,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn get(&self, i: usize) -> Option<Value> {
+        if i < self.len {
+            Some(self.buf.borrow()[i].clone())
+        } else {
+            None
+        }
+    }
+
+    pub fn items(&self) -> Vec<Value> {
+        self.buf.borrow()[..self.len].to_vec()
+    }
+
+    pub fn contains(&self, v: &Value) -> bool {
+        self.buf.borrow()[..self.len].contains(v)
+    }
+
+    pub fn push(&self, v: Value) -> ListVal {
+        let mut buf = self.buf.borrow_mut();
+        if buf.len() == self.len {
+            buf.push(v);
+            return ListVal {
+                buf: self.buf.clone(),
+                len: self.len + 1,
+            };
+        }
+        let mut items = buf[..self.len].to_vec();
+        items.push(v);
+        ListVal::new(items)
+    }
+}
+
+impl PartialEq for ListVal {
+    fn eq(&self, other: &Self) -> bool {
+        self.len == other.len && self.buf.borrow()[..self.len] == other.buf.borrow()[..other.len]
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Value {
+    Int(i64),
+    Str(String),
+    Bool(bool),
+    List(ListVal),
+    Unit,
+}
+
+impl Value {
+    /// Like Display, but strings are quoted. Used inside lists and in diagnostics.
+    pub fn repr(&self) -> String {
+        match self {
+            Value::Str(s) => format!("{:?}", s),
+            v => v.to_string(),
+        }
+    }
+
+    fn type_name(&self) -> String {
+        match self {
+            Value::Int(_) => "Int".into(),
+            Value::Str(_) => "Str".into(),
+            Value::Bool(_) => "Bool".into(),
+            Value::Unit => "Unit".into(),
+            Value::List(_) => "List".into(),
+        }
+    }
+}
+
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Value::Int(n) => write!(f, "{}", n),
+            Value::Str(s) => write!(f, "{}", s),
+            Value::Bool(b) => write!(f, "{}", b),
+            Value::Unit => write!(f, "()"),
+            Value::List(xs) => {
+                let items: Vec<_> = xs.items().iter().map(|x| x.repr()).collect();
+                write!(f, "[{}]", items.join(", "))
+            }
+        }
+    }
+}
+
+fn has_type(v: &Value, t: &Type) -> bool {
+    match (t, v) {
+        (Type::Any, _) => true,
+        (Type::Int, Value::Int(_))
+        | (Type::Str, Value::Str(_))
+        | (Type::Bool, Value::Bool(_))
+        | (Type::Unit, Value::Unit) => true,
+        // Element types are guaranteed by the static checker; re-checking them here
+        // would make every call that passes a list O(n).
+        (Type::List(_), Value::List(_)) => true,
+        _ => false,
+    }
+}
+
+enum Flow {
+    Next,
+    Ret(Value),
+}
+
+type R<T> = Result<T, Error>;
+
+const MAX_DEPTH: usize = 10_000;
+
+pub struct Interp<'a> {
+    funcs: HashMap<&'a str, &'a Func>,
+    scopes: Vec<HashMap<String, Value>>,
+    depth: usize,
+    rng: u64,
+}
+
+impl<'a> Interp<'a> {
+    pub fn new(p: &'a Program) -> Self {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(1);
+        Interp {
+            funcs: p.funcs.iter().map(|f| (f.name.as_str(), f)).collect(),
+            scopes: vec![HashMap::new()],
+            depth: 0,
+            rng: seed | 1,
+        }
+    }
+
+    pub fn run_test(&mut self, t: &'a Test) -> R<()> {
+        self.scopes = vec![HashMap::new()];
+        self.block(&t.body).map(|_| ())
+    }
+
+    pub fn call(&mut self, name: &str, args: Vec<Value>, pos: Pos) -> R<Value> {
+        match self.funcs.get(name).copied() {
+            Some(f) => self.call_user(f, args, pos),
+            None => self.builtin(name, args, pos),
+        }
+    }
+
+    fn call_user(&mut self, f: &'a Func, args: Vec<Value>, pos: Pos) -> R<Value> {
+        if self.depth >= MAX_DEPTH {
+            return Err(Error::new(
+                "runtime",
+                pos,
+                format!("recursion deeper than {} calls in `{}`", MAX_DEPTH, f.name),
+            )
+            .hint("check that the recursion has a base case that is always reached"));
+        }
+        for (p, a) in f.params.iter().zip(&args) {
+            if !has_type(a, &p.ty) {
+                return Err(Error::new(
+                    "type",
+                    pos,
+                    format!(
+                        "`{}` expects `{}: {}` but got {} {}",
+                        f.name,
+                        p.name,
+                        p.ty,
+                        a.type_name(),
+                        a.repr()
+                    ),
+                ));
+            }
+        }
+        let inputs: Vec<String> = f
+            .params
+            .iter()
+            .zip(&args)
+            .map(|(p, a)| format!("{} = {}", p.name, a.repr()))
+            .collect();
+        let inputs = if inputs.is_empty() {
+            "no arguments".to_string()
+        } else {
+            inputs.join(", ")
+        };
+        let frame: HashMap<String, Value> =
+            f.params.iter().map(|p| p.name.clone()).zip(args).collect();
+
+        let saved = std::mem::replace(&mut self.scopes, vec![frame]);
+        self.depth += 1;
+        let res = self.run_fn(f, pos, &inputs);
+        self.depth -= 1;
+        self.scopes = saved;
+        res
+    }
+
+    fn run_fn(&mut self, f: &'a Func, call_pos: Pos, inputs: &str) -> R<Value> {
+        // A failed precondition is the caller's fault, so it is reported at the call site.
+        for c in &f.requires {
+            if !self.cond(c)? {
+                return Err(Error::new(
+                    "contract",
+                    call_pos,
+                    format!("precondition of `{}` violated: `{}`", f.name, c.text),
+                )
+                .hint(format!("called with {}", inputs)));
+            }
+        }
+        let v = match self.block(&f.body)? {
+            Flow::Ret(v) => v,
+            Flow::Next => Value::Unit,
+        };
+        if !has_type(&v, &f.ret) {
+            return Err(Error::new(
+                "type",
+                f.pos,
+                format!(
+                    "`{}` should return {} but returned {} {}",
+                    f.name,
+                    f.ret,
+                    v.type_name(),
+                    v.repr()
+                ),
+            )
+            .hint(format!("called with {}", inputs)));
+        }
+        // A failed postcondition is the function's own fault, so it is reported at the clause.
+        if !f.ensures.is_empty() {
+            self.scopes.truncate(1);
+            self.scopes[0].insert("result".into(), v.clone());
+            for c in &f.ensures {
+                if !self.cond(c)? {
+                    return Err(Error::new(
+                        "contract",
+                        c.pos,
+                        format!("postcondition of `{}` violated: `{}`", f.name, c.text),
+                    )
+                    .hint(format!(
+                        "called with {}, returned {}",
+                        inputs,
+                        v.repr()
+                    )));
+                }
+            }
+        }
+        Ok(v)
+    }
+
+    fn cond(&mut self, e: &Expr) -> R<bool> {
+        match self.eval(e)? {
+            Value::Bool(b) => Ok(b),
+            v => Err(Error::new(
+                "type",
+                e.pos,
+                format!("condition must be Bool, got {} {}", v.type_name(), v.repr()),
+            )),
+        }
+    }
+
+    fn block(&mut self, stmts: &'a [Stmt]) -> R<Flow> {
+        self.scopes.push(HashMap::new());
+        let mut out = Ok(Flow::Next);
+        for s in stmts {
+            match self.stmt(s) {
+                Ok(Flow::Next) => {}
+                other => {
+                    out = other;
+                    break;
+                }
+            }
+        }
+        self.scopes.pop();
+        out
+    }
+
+    fn stmt(&mut self, s: &'a Stmt) -> R<Flow> {
+        match s {
+            Stmt::Let(n, _, e) => {
+                let v = self.eval(e)?;
+                self.scopes.last_mut().unwrap().insert(n.clone(), v);
+            }
+            Stmt::Assign(n, e, pos) => {
+                let v = self.eval(e)?;
+                match self.scopes.iter_mut().rev().find_map(|s| s.get_mut(n)) {
+                    Some(slot) => *slot = v,
+                    None => {
+                        return Err(Error::new(
+                            "name",
+                            *pos,
+                            format!("undefined variable `{}`", n),
+                        ))
+                    }
+                }
+            }
+            Stmt::Expr(e) => {
+                self.eval(e)?;
+            }
+            Stmt::If(c, then, els) => {
+                if self.cond(c)? {
+                    return self.block(then);
+                } else if let Some(b) = els {
+                    return self.block(b);
+                }
+            }
+            Stmt::While(c, body) => {
+                while self.cond(c)? {
+                    if let Flow::Ret(v) = self.block(body)? {
+                        return Ok(Flow::Ret(v));
+                    }
+                }
+            }
+            Stmt::For(n, e, body, pos) => {
+                let items = match self.eval(e)? {
+                    Value::List(xs) => xs.items(),
+                    Value::Str(s) => s.chars().map(|c| Value::Str(c.to_string())).collect(),
+                    v => {
+                        return Err(Error::new(
+                            "type",
+                            *pos,
+                            format!("cannot loop over {} {}", v.type_name(), v.repr()),
+                        ))
+                    }
+                };
+                for item in items {
+                    self.scopes.push([(n.clone(), item)].into());
+                    let r = self.block(body);
+                    self.scopes.pop();
+                    if let Flow::Ret(v) = r? {
+                        return Ok(Flow::Ret(v));
+                    }
+                }
+            }
+            Stmt::Return(e, _) => {
+                let v = match e {
+                    Some(e) => self.eval(e)?,
+                    None => Value::Unit,
+                };
+                return Ok(Flow::Ret(v));
+            }
+            Stmt::Assert(e) => {
+                if !self.cond(e)? {
+                    let mut err = Error::new(
+                        "assertion",
+                        e.pos,
+                        format!("assertion failed: `{}`", e.text),
+                    );
+                    if let ExprKind::Binary(op, l, r) = &e.kind {
+                        if matches!(op, BinOp::And | BinOp::Or) {
+                            return Err(err);
+                        }
+                        let (l, r) = (self.eval(l)?, self.eval(r)?);
+                        err = err.hint(format!(
+                            "left side = {}, right side = {}",
+                            l.repr(),
+                            r.repr()
+                        ));
+                    }
+                    return Err(err);
+                }
+            }
+        }
+        Ok(Flow::Next)
+    }
+
+    fn eval(&mut self, e: &Expr) -> R<Value> {
+        use Value::*;
+        Ok(match &e.kind {
+            ExprKind::Int(n) => Int(*n),
+            ExprKind::Str(s) => Str(s.clone()),
+            ExprKind::Bool(b) => Bool(*b),
+            ExprKind::Var(n) => match self.scopes.iter().rev().find_map(|s| s.get(n)) {
+                Some(v) => v.clone(),
+                None => {
+                    return Err(Error::new(
+                        "name",
+                        e.pos,
+                        format!("undefined variable `{}`", n),
+                    ))
+                }
+            },
+            ExprKind::List(xs) => List(ListVal::new(
+                xs.iter().map(|x| self.eval(x)).collect::<R<_>>()?,
+            )),
+            ExprKind::Unary(op, x) => match (op, self.eval(x)?) {
+                (UnOp::Neg, Int(n)) => Int(n.checked_neg().ok_or_else(|| overflow(e))?),
+                (UnOp::Not, Bool(b)) => Bool(!b),
+                (_, v) => {
+                    return Err(Error::new(
+                        "type",
+                        e.pos,
+                        format!(
+                            "cannot apply `{}` to {} {}",
+                            e.text,
+                            v.type_name(),
+                            v.repr()
+                        ),
+                    ))
+                }
+            },
+            ExprKind::Binary(BinOp::And, l, r) => Bool(self.cond(l)? && self.cond(r)?),
+            ExprKind::Binary(BinOp::Or, l, r) => Bool(self.cond(l)? || self.cond(r)?),
+            ExprKind::Binary(op, l, r) => {
+                let (a, b) = (self.eval(l)?, self.eval(r)?);
+                binary(*op, a, b, e)?
+            }
+            ExprKind::Call(name, args) => {
+                let vals = args.iter().map(|a| self.eval(a)).collect::<R<Vec<_>>>()?;
+                self.call(name, vals, e.pos)?
+            }
+            ExprKind::Index(target, idx) => {
+                let (t, i) = (self.eval(target)?, self.eval(idx)?);
+                let oob = |len: usize, i: i64| {
+                    Error::new(
+                        "runtime",
+                        e.pos,
+                        format!("index {} out of bounds (length {})", i, len),
+                    )
+                };
+                match (t, i) {
+                    (List(xs), Int(i)) => {
+                        let len = xs.len();
+                        usize::try_from(i)
+                            .ok()
+                            .and_then(|u| xs.get(u))
+                            .ok_or_else(|| oob(len, i))?
+                    }
+                    (Str(s), Int(i)) => {
+                        let len = s.chars().count();
+                        let c = usize::try_from(i)
+                            .ok()
+                            .and_then(|u| s.chars().nth(u))
+                            .ok_or_else(|| oob(len, i))?;
+                        Str(c.to_string())
+                    }
+                    (t, i) => {
+                        return Err(Error::new(
+                            "type",
+                            e.pos,
+                            format!("cannot index {} with {}", t.type_name(), i.type_name()),
+                        ))
+                    }
+                }
+            }
+        })
+    }
+
+    fn builtin(&mut self, name: &str, args: Vec<Value>, pos: Pos) -> R<Value> {
+        use Value::*;
+        let rt = |msg: String| Error::new("runtime", pos, msg);
+        Ok(match (name, args.as_slice()) {
+            ("print", _) => {
+                let parts: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+                println!("{}", parts.join(" "));
+                Unit
+            }
+            ("input", _) => {
+                if let [Str(prompt)] = args.as_slice() {
+                    print!("{}", prompt);
+                    let _ = std::io::stdout().flush();
+                }
+                let mut line = String::new();
+                std::io::stdin()
+                    .read_line(&mut line)
+                    .map_err(|e| rt(e.to_string()))?;
+                Str(line.trim_end_matches(['\n', '\r']).to_string())
+            }
+            ("len", [List(xs)]) => Int(xs.len() as i64),
+            ("len", [Str(s)]) => Int(s.chars().count() as i64),
+            ("str", [v]) => Str(v.to_string()),
+            ("int", [Int(n)]) => Int(*n),
+            ("int", [Str(s)]) => Int(s
+                .trim()
+                .parse()
+                .map_err(|_| rt(format!("cannot convert {:?} to Int", s)))?),
+            ("abs", [Int(n)]) => Int(n
+                .checked_abs()
+                .ok_or_else(|| rt("integer overflow in `abs`".into()))?),
+            ("push", [List(xs), v]) => List(xs.push(v.clone())),
+            ("range", [Int(n)]) => List(ListVal::new((0..*n).map(Int).collect())),
+            ("range", [Int(a), Int(b)]) => List(ListVal::new((*a..*b).map(Int).collect())),
+            ("join", [List(xs), Str(sep)]) => Str(xs
+                .items()
+                .iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>()
+                .join(sep)),
+            ("split", [Str(_), Str(sep)]) if sep.is_empty() => {
+                return Err(rt(
+                    "invalid arguments to `split`: the separator must not be empty".into(),
+                ))
+            }
+            ("split", [Str(s), Str(sep)]) => List(ListVal::new(
+                s.split(sep.as_str()).map(|p| Str(p.into())).collect(),
+            )),
+            ("contains", [List(xs), v]) => Bool(xs.contains(v)),
+            ("contains", [Str(s), Str(sub)]) => Bool(s.contains(sub.as_str())),
+            ("read_file", [Str(p)]) => Str(std::fs::read_to_string(p)
+                .map_err(|e| rt(format!("cannot read {:?}: {}", p, e)))?),
+            ("write_file", [Str(p), Str(c)]) => {
+                std::fs::write(p, c).map_err(|e| rt(format!("cannot write {:?}: {}", p, e)))?;
+                Unit
+            }
+            ("now", []) => Int(std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0)),
+            ("random", [Int(n)]) if *n <= 0 => {
+                return Err(rt(
+                    "invalid arguments to `random`: the limit must be positive".into(),
+                ))
+            }
+            ("random", [Int(n)]) => {
+                self.rng ^= self.rng << 13;
+                self.rng ^= self.rng >> 7;
+                self.rng ^= self.rng << 17;
+                Int((self.rng % (*n as u64)) as i64)
+            }
+            _ => {
+                let got: Vec<String> = args
+                    .iter()
+                    .map(|a| format!("{} {}", a.type_name(), a.repr()))
+                    .collect();
+                return Err(Error::new(
+                    "type",
+                    pos,
+                    format!("invalid arguments to `{}`: ({})", name, got.join(", ")),
+                ));
+            }
+        })
+    }
+}
+
+fn overflow(e: &Expr) -> Error {
+    Error::new(
+        "runtime",
+        e.pos,
+        format!("integer overflow in `{}`", e.text),
+    )
+}
+
+fn binary(op: BinOp, a: Value, b: Value, e: &Expr) -> R<Value> {
+    use BinOp::*;
+    use Value::*;
+    let checked = |r: Option<i64>| r.map(Int).ok_or_else(|| overflow(e));
+    Ok(match (op, a, b) {
+        (Add, Int(x), Int(y)) => checked(x.checked_add(y))?,
+        (Sub, Int(x), Int(y)) => checked(x.checked_sub(y))?,
+        (Mul, Int(x), Int(y)) => checked(x.checked_mul(y))?,
+        (Div | Mod, Int(_), Int(0)) => {
+            return Err(Error::new(
+                "runtime",
+                e.pos,
+                format!("division by zero in `{}`", e.text),
+            )
+            .hint("guard it with `requires` on the divisor, e.g. `requires b != 0`"))
+        }
+        (Div, Int(x), Int(y)) => checked(x.checked_div(y))?,
+        (Mod, Int(x), Int(y)) => checked(x.checked_rem(y))?,
+        (Add, Str(x), Str(y)) => Str(x + &y),
+        (Add, List(x), List(y)) => List(ListVal::new([x.items(), y.items()].concat())),
+        (Eq, x, y) => Bool(x == y),
+        (Ne, x, y) => Bool(x != y),
+        (Lt, Int(x), Int(y)) => Bool(x < y),
+        (Le, Int(x), Int(y)) => Bool(x <= y),
+        (Gt, Int(x), Int(y)) => Bool(x > y),
+        (Ge, Int(x), Int(y)) => Bool(x >= y),
+        (Lt, Str(x), Str(y)) => Bool(x < y),
+        (Le, Str(x), Str(y)) => Bool(x <= y),
+        (Gt, Str(x), Str(y)) => Bool(x > y),
+        (Ge, Str(x), Str(y)) => Bool(x >= y),
+        (_, x, y) => {
+            let mut err = Error::new(
+                "type",
+                e.pos,
+                format!(
+                    "cannot apply `{}` to {} {} and {} {}",
+                    op.symbol(),
+                    x.type_name(),
+                    x.repr(),
+                    y.type_name(),
+                    y.repr()
+                ),
+            );
+            if op == Add && (matches!(x, Str(_)) || matches!(y, Str(_))) {
+                err = err.hint("convert with `str(...)` first, e.g. \"total: \" + str(n)");
+            }
+            return Err(err);
+        }
+    })
+}

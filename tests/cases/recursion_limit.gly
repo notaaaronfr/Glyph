@@ -1,0 +1,8 @@
+# Runaway recursion stops with a clear error instead of crashing.
+fn f(n: Int) -> Int {
+  return 1 + f(n + 1)
+}
+
+fn main() uses io {
+  print(f(0))
+}

@@ -1,0 +1,14 @@
+exit: 1
+--- stdout ---
+--- stderr ---
+tests/cases/effect_errors.gly:5:3: effect error: `tax` performs effect `fs` (by calling `write_file`) but does not declare it
+5 |   write_file("/tmp/log.txt", str(amount))
+  |   ^
+  hint: add `uses fs` to the signature if this is intended
+tests/cases/effect_errors.gly:11:3: effect error: `summary` performs effect `io` (by calling `report`) but does not declare it
+11 |   report(x)
+   |   ^
+  hint: add `uses io` to the signature if this is intended
+tests/cases/effect_errors.gly:21:9: name error: undefined variable `totl`
+21 |   print(totl)
+   |         ^

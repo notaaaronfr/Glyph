@@ -1,0 +1,16 @@
+# A bug the contract catches at runtime: the function breaks its own promise.
+
+fn discount(price: Int, percent: Int) -> Int
+  requires percent >= 0 and percent <= 100
+  ensures result <= price
+{
+  return price + price * percent / 100
+}
+
+fn main() uses io {
+  print(discount(200, 10))
+}
+
+test "discount of 50%" {
+  assert discount(200, 50) == 100
+}

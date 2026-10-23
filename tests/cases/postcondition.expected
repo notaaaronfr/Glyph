@@ -1,0 +1,7 @@
+exit: 1
+--- stdout ---
+--- stderr ---
+tests/cases/postcondition.gly:5:11: contract error: postcondition of `discount` violated: `result <= price`
+5 |   ensures result <= price
+  |           ^
+  hint: called with price = 200, percent = 10, returned 220

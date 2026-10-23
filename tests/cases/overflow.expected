@@ -1,0 +1,6 @@
+exit: 1
+--- stdout ---
+--- stderr ---
+tests/cases/overflow.gly:4:9: runtime error: integer overflow in `x + 1`
+4 |   print(x + 1)
+  |         ^

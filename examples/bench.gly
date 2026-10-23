@@ -1,0 +1,40 @@
+# Benchmark: recursion, loops and lists. Compare:
+#   glyph run examples/bench.gly
+#   glyph run examples/bench.gly --native
+
+fn fib(n: Int) -> Int
+  requires n >= 0
+{
+  if n < 2 { return n }
+  return fib(n - 1) + fib(n - 2)
+}
+
+fn count_primes(limit: Int) -> Int {
+  let count = 0
+  let n = 2
+  while n < limit {
+    let d = 2
+    let prime = true
+    while d * d <= n and prime {
+      if n % d == 0 { prime = false }
+      d = d + 1
+    }
+    if prime { count = count + 1 }
+    n = n + 1
+  }
+  return count
+}
+
+fn squares(n: Int) -> List[Int] {
+  let xs: List[Int] = []
+  for i in range(n) {
+    xs = push(xs, i * i)
+  }
+  return xs
+}
+
+fn main() uses io {
+  print("fib(27) =", fib(27))
+  print("primes below 200000 =", count_primes(200000))
+  print("sum of squares count =", len(squares(1000000)))
+}

@@ -1,0 +1,49 @@
+# Glyph demo: effects, contracts and tests.
+
+fn deposit(balance: Int, amount: Int) -> Int
+  requires amount > 0
+  ensures result == balance + amount
+{
+  return balance + amount
+}
+
+fn withdraw(balance: Int, amount: Int) -> Int
+  requires amount > 0
+  requires amount <= balance
+  ensures result >= 0
+{
+  return balance - amount
+}
+
+fn total(xs: List[Int]) -> Int {
+  let sum = 0
+  for x in xs {
+    sum = sum + x
+  }
+  return sum
+}
+
+fn report(name: Str, balance: Int) uses io {
+  print(name + ": " + str(balance))
+}
+
+fn main() uses io {
+  let b = deposit(100, 50)
+  b = withdraw(b, 30)
+  report("alice", b)
+  print("total of deposits:", total([10, 20, 30]))
+  print("now trying to withdraw 1000...")
+  withdraw(b, 1000)
+}
+
+test "deposit adds" {
+  assert deposit(10, 5) == 15
+}
+
+test "withdraw subtracts" {
+  assert withdraw(10, 3) == 7
+}
+
+test "total sums a list" {
+  assert total([1, 2, 3]) == 6
+}

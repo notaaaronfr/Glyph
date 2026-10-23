@@ -1,0 +1,7 @@
+exit: 1
+--- stdout ---
+--- stderr ---
+tests/cases/recursion_limit.gly:3:14: runtime error: recursion deeper than 10000 calls in `f`
+3 |   return 1 + f(n + 1)
+  |              ^
+  hint: check that the recursion has a base case that is always reached

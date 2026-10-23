@@ -1,0 +1,16 @@
+exit: 1
+--- stdout ---
+6765 B A C
+[0, 1, 4, 9, 16] [0, 1, 4, 9, 16, 99] [0, 1, 4, 9, 16, 77] true true
+5 é ["a", "", "b"] 1-2 [["a"], ["b\"q"]]
+false -1 true true -42
+h
+é
+!
+12 true [1, 2, 3] 5 [true, false]
+2 true false
+--- stderr ---
+tests/cases/basics.gly:39:9: contract error: precondition of `safe_div` violated: `b != 0`
+39 |   print(safe_div(10, 0))
+   |         ^
+  hint: called with a = 10, b = 0

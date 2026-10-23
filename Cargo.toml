@@ -1,0 +1,15 @@
+[package]
+name = "glyph"
+version = "0.2.0"
+edition = "2021"
+description = "Glyph: a language AI can write and humans can trust. Declared effects, contracts, built-in tests, native compiler."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/notaaaronfr/Glyph"
+readme = "README.md"
+keywords = ["language", "compiler", "interpreter", "effects", "contracts"]
+categories = ["compilers", "development-tools"]
+
+[[bin]]
+name = "glyph"
+
+[dependencies]

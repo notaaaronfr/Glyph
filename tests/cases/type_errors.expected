@@ -1,0 +1,21 @@
+exit: 1
+--- stdout ---
+--- stderr ---
+tests/cases/type_errors.gly:2:1: type error: `half` must return Int on every path
+2 | fn half(n: Int) -> Int {
+  | ^
+  hint: add a `return` at the end of the function
+tests/cases/type_errors.gly:8:11: type error: the new value of `total` must be Int, found Str
+8 |   total = "ten"
+  |           ^
+tests/cases/type_errors.gly:9:14: type error: argument `n` of `half` must be Int, found Str
+9 |   print(half("4"))
+  |              ^
+tests/cases/type_errors.gly:10:12: type error: cannot tell what type of list `[]` is
+10 |   let xs = []
+   |            ^
+  hint: annotate the variable, e.g. `let xs: List[Int] = []`
+tests/cases/type_errors.gly:11:9: type error: cannot apply `+` to Str and Int
+11 |   print("count: " + 3)
+   |         ^
+  hint: convert with `str(...)` first, e.g. "total: " + str(n)

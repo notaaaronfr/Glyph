@@ -1,0 +1,12 @@
+# Static type errors, all reported before the program runs.
+fn half(n: Int) -> Int {
+  if n > 0 { return n / 2 }
+}
+
+fn main() uses io {
+  let total = 0
+  total = "ten"
+  print(half("4"))
+  let xs = []
+  print("count: " + 3)
+}
