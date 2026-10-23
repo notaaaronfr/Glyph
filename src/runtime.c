@@ -33,8 +33,18 @@ typedef union { int64_t i; bool b; void *p; } tn_val;
 typedef struct { int64_t cap, used; tn_val items[]; } tn_buf;
 typedef struct { tn_buf *buf; int64_t len; } tn_list;
 
-enum { TN_INT, TN_STR, TN_BOOL, TN_UNIT, TN_LIST };
-typedef struct tn_type { int kind; const struct tn_type *elem; } tn_type;
+/* Records are immutable arrays of fields in declaration order: `p.x = v` copies. */
+typedef struct { int64_t n; tn_val f[]; } tn_rec;
+
+enum { TN_INT, TN_STR, TN_BOOL, TN_UNIT, TN_LIST, TN_RECORD };
+typedef struct tn_type {
+    int kind;
+    const struct tn_type *elem;               /* lists */
+    const char *name;                         /* records */
+    int64_t nfields;
+    const char *const *fnames;
+    const struct tn_type *const *ftypes;
+} tn_type;
 static const tn_type TY_i = {TN_INT, 0}, TY_s = {TN_STR, 0}, TY_b = {TN_BOOL, 0}, TY_u = {TN_UNIT, 0};
 
 static int64_t tn_depth = 0;
@@ -281,6 +291,21 @@ static tn_list *tn_split(tn_str *s, tn_str *sep, tn_loc at) {
     return tn_list_push(l, TN_P(tn_str_from(s->data + start, s->len - start)));
 }
 
+/* ---- records ---- */
+
+static tn_rec *tn_rec_new(int64_t n, const tn_val *fields) {
+    tn_rec *r = tn_alloc(sizeof(tn_rec) + sizeof(tn_val) * n);
+    r->n = n;
+    if (n) memcpy(r->f, fields, sizeof(tn_val) * n);
+    return r;
+}
+
+static tn_rec *tn_rec_set(tn_rec *r, int64_t i, tn_val v) {
+    tn_rec *c = tn_rec_new(r->n, r->f);
+    c->f[i] = v;
+    return c;
+}
+
 /* ---- generic operations, driven by type descriptors ---- */
 
 typedef struct { char *p; int64_t len, cap; } tn_sb;
@@ -344,6 +369,23 @@ static void tn_show(tn_sb *b, tn_val v, const tn_type *t, bool quote) {
         tn_sb_put(b, "]", 1);
         break;
     }
+    case TN_RECORD: {
+        tn_rec *r = v.p;
+        tn_sb_put(b, t->name, strlen(t->name));
+        if (t->nfields == 0) {
+            tn_sb_put(b, " {}", 3);
+            break;
+        }
+        tn_sb_put(b, " { ", 3);
+        for (int64_t i = 0; i < t->nfields; i++) {
+            if (i) tn_sb_put(b, ", ", 2);
+            tn_sb_put(b, t->fnames[i], strlen(t->fnames[i]));
+            tn_sb_put(b, ": ", 2);
+            tn_show(b, r->f[i], t->ftypes[i], true);
+        }
+        tn_sb_put(b, " }", 2);
+        break;
+    }
     }
 }
 
@@ -362,6 +404,12 @@ static bool tn_eq(tn_val a, tn_val b, const tn_type *t) {
     case TN_BOOL: return a.b == b.b;
     case TN_UNIT: return true;
     case TN_STR: return tn_str_eq(a.p, b.p);
+    case TN_RECORD: {
+        tn_rec *x = a.p, *y = b.p;
+        for (int64_t i = 0; i < t->nfields; i++)
+            if (!tn_eq(x->f[i], y->f[i], t->ftypes[i])) return false;
+        return true;
+    }
     default: {
         tn_list *x = a.p, *y = b.p;
         if (x->len != y->len) return false;

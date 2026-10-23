@@ -43,7 +43,7 @@ A human reviewer doesn't need to read 500 lines. They read the signatures, which
 
 ## Where we're going
 
-**Near term: the language.** Records and enums, modules, memory management for native code, a faster interpreter, editor support (LSP), and a package manager.
+**Near term: the language.** Enums and pattern matching (records shipped in v0.4), modules, memory management for native code, a faster interpreter, editor support (LSP), and a package manager.
 
 **AI in the toolchain.**
 - `glyph fix` (shipped in v0.3): an AI repair loop. A proposed fix is accepted only if it type-checks, adds no new effects, keeps every contract and test unchanged, and passes.

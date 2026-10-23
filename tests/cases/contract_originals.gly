@@ -1,0 +1,17 @@
+# `ensures` refers to the arguments the function was called with,
+# even when the body reassigns its parameters.
+fn double_by_counting(n: Int) -> Int
+  requires n >= 0
+  ensures result == n * 2
+{
+  let total = 0
+  while n > 0 {
+    total = total + 2
+    n = n - 1
+  }
+  return total
+}
+
+fn main() uses io {
+  print(double_by_counting(5))
+}

@@ -75,7 +75,16 @@ pub enum Value {
     Str(String),
     Bool(bool),
     List(ListVal),
+    Record(Rc<RecordVal>),
     Unit,
+}
+
+/// A record value. Fields are stored in declaration order; records are immutable,
+/// so `p.x = v` builds an updated copy.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordVal {
+    pub name: String,
+    pub fields: Vec<(String, Value)>,
 }
 
 impl Value {
@@ -94,6 +103,7 @@ impl Value {
             Value::Bool(_) => "Bool".into(),
             Value::Unit => "Unit".into(),
             Value::List(_) => "List".into(),
+            Value::Record(r) => r.name.clone(),
         }
     }
 }
@@ -109,6 +119,15 @@ impl fmt::Display for Value {
                 let items: Vec<_> = xs.items().iter().map(|x| x.repr()).collect();
                 write!(f, "[{}]", items.join(", "))
             }
+            Value::Record(r) if r.fields.is_empty() => write!(f, "{} {{}}", r.name),
+            Value::Record(r) => {
+                let fields: Vec<_> = r
+                    .fields
+                    .iter()
+                    .map(|(n, v)| format!("{}: {}", n, v.repr()))
+                    .collect();
+                write!(f, "{} {{ {} }}", r.name, fields.join(", "))
+            }
         }
     }
 }
@@ -123,6 +142,7 @@ fn has_type(v: &Value, t: &Type) -> bool {
         // Element types are guaranteed by the static checker; re-checking them here
         // would make every call that passes a list O(n).
         (Type::List(_), Value::List(_)) => true,
+        (Type::Record(n), Value::Record(r)) => *n == r.name,
         _ => false,
     }
 }
@@ -138,6 +158,7 @@ const MAX_DEPTH: usize = 10_000;
 
 pub struct Interp<'a> {
     funcs: HashMap<&'a str, &'a Func>,
+    records: HashMap<&'a str, &'a TypeDecl>,
     scopes: Vec<HashMap<String, Value>>,
     depth: usize,
     rng: u64,
@@ -151,6 +172,7 @@ impl<'a> Interp<'a> {
             .unwrap_or(1);
         Interp {
             funcs: p.funcs.iter().map(|f| (f.name.as_str(), f)).collect(),
+            records: p.types.iter().map(|t| (t.name.as_str(), t)).collect(),
             scopes: vec![HashMap::new()],
             depth: 0,
             rng: seed | 1,
@@ -208,15 +230,24 @@ impl<'a> Interp<'a> {
         let frame: HashMap<String, Value> =
             f.params.iter().map(|p| p.name.clone()).zip(args).collect();
 
+        // `ensures` describes the inputs the function was called with, even if the body
+        // reassigns its parameters, so keep the originals.
+        let originals = (!f.ensures.is_empty()).then(|| frame.clone());
         let saved = std::mem::replace(&mut self.scopes, vec![frame]);
         self.depth += 1;
-        let res = self.run_fn(f, pos, &inputs);
+        let res = self.run_fn(f, pos, &inputs, originals);
         self.depth -= 1;
         self.scopes = saved;
         res
     }
 
-    fn run_fn(&mut self, f: &'a Func, call_pos: Pos, inputs: &str) -> R<Value> {
+    fn run_fn(
+        &mut self,
+        f: &'a Func,
+        call_pos: Pos,
+        inputs: &str,
+        originals: Option<HashMap<String, Value>>,
+    ) -> R<Value> {
         // A failed precondition is the caller's fault, so it is reported at the call site.
         for c in &f.requires {
             if !self.cond(c)? {
@@ -247,9 +278,9 @@ impl<'a> Interp<'a> {
             .hint(format!("called with {}", inputs)));
         }
         // A failed postcondition is the function's own fault, so it is reported at the clause.
-        if !f.ensures.is_empty() {
-            self.scopes.truncate(1);
-            self.scopes[0].insert("result".into(), v.clone());
+        if let Some(mut frame) = originals {
+            frame.insert("result".into(), v.clone());
+            self.scopes = vec![frame];
             for c in &f.ensures {
                 if !self.cond(c)? {
                     return Err(Error::new(
@@ -300,6 +331,18 @@ impl<'a> Interp<'a> {
             Stmt::Let(n, _, e) => {
                 let v = self.eval(e)?;
                 self.scopes.last_mut().unwrap().insert(n.clone(), v);
+            }
+            Stmt::SetField(n, path, e, pos) => {
+                let v = self.eval(e)?;
+                let cur = self.eval(&Expr {
+                    kind: ExprKind::Var(n.clone()),
+                    pos: *pos,
+                    text: n.clone(),
+                })?;
+                let updated = set_path(cur, path, v)?;
+                if let Some(slot) = self.scopes.iter_mut().rev().find_map(|s| s.get_mut(n)) {
+                    *slot = updated;
+                }
             }
             Stmt::Assign(n, e, pos) => {
                 let v = self.eval(e)?;
@@ -429,6 +472,43 @@ impl<'a> Interp<'a> {
                 let vals = args.iter().map(|a| self.eval(a)).collect::<R<Vec<_>>>()?;
                 self.call(name, vals, e.pos)?
             }
+            ExprKind::Record(name, fields) => {
+                // Evaluate in source order (effects happen in the order written),
+                // then store in declaration order.
+                let mut vals = HashMap::new();
+                for (f, fe, _) in fields {
+                    vals.insert(f.as_str(), self.eval(fe)?);
+                }
+                let decl = self.records[name.as_str()];
+                let fields = decl
+                    .fields
+                    .iter()
+                    .map(|(f, _, _)| (f.clone(), vals.remove(f.as_str()).unwrap_or(Unit)))
+                    .collect();
+                Record(Rc::new(RecordVal {
+                    name: name.clone(),
+                    fields,
+                }))
+            }
+            ExprKind::Field(target, f) => match self.eval(target)? {
+                Record(r) => match r.fields.iter().find(|(n, _)| n == f) {
+                    Some((_, v)) => v.clone(),
+                    None => {
+                        return Err(Error::new(
+                            "type",
+                            e.pos,
+                            format!("`{}` has no field `{}`", r.name, f),
+                        ))
+                    }
+                },
+                v => {
+                    return Err(Error::new(
+                        "type",
+                        e.pos,
+                        format!("{} has no fields", v.type_name()),
+                    ))
+                }
+            },
             ExprKind::Index(target, idx) => {
                 let (t, i) = (self.eval(target)?, self.eval(idx)?);
                 let oob = |len: usize, i: i64| {
@@ -558,6 +638,32 @@ fn overflow(e: &Expr) -> Error {
         e.pos,
         format!("integer overflow in `{}`", e.text),
     )
+}
+
+/// A copy of `v` with the field at `path` replaced by `new`.
+fn set_path(v: Value, path: &[(String, Pos)], new: Value) -> R<Value> {
+    let Some(((f, pos), rest)) = path.split_first() else {
+        return Ok(new);
+    };
+    match v {
+        Value::Record(r) => {
+            let mut r = (*r).clone();
+            let Some(slot) = r.fields.iter_mut().find(|(n, _)| n == f) else {
+                return Err(Error::new(
+                    "type",
+                    *pos,
+                    format!("`{}` has no field `{}`", r.name, f),
+                ));
+            };
+            slot.1 = set_path(std::mem::replace(&mut slot.1, Value::Unit), rest, new)?;
+            Ok(Value::Record(Rc::new(r)))
+        }
+        v => Err(Error::new(
+            "type",
+            *pos,
+            format!("{} has no fields", v.type_name()),
+        )),
+    }
 }
 
 fn binary(op: BinOp, a: Value, b: Value, e: &Expr) -> R<Value> {

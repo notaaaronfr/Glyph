@@ -2,31 +2,48 @@ use crate::ast::*;
 use crate::error::{Error, Pos};
 use crate::lexer::{lex, Tok, Token};
 
-const KEYWORDS: [&str; 18] = [
+const KEYWORDS: [&str; 19] = [
     "fn", "let", "if", "else", "while", "for", "in", "return", "true", "false", "uses", "requires",
-    "ensures", "test", "assert", "and", "or", "not",
+    "ensures", "test", "assert", "and", "or", "not", "type",
 ];
 
+const BUILTIN_TYPES: [&str; 6] = ["Int", "Str", "Bool", "Unit", "Any", "List"];
+
 pub fn parse(src: &str) -> Result<Program, Error> {
+    let toks = lex(src)?;
+    // Record types may be used before they are declared, and `Name {` is only a record
+    // literal when `Name` is a declared type, so collect the type names up front.
+    let type_names = toks
+        .windows(2)
+        .filter(|w| w[0].tok == Tok::Ident("type".into()))
+        .filter_map(|w| match &w[1].tok {
+            Tok::Ident(n) => Some(n.clone()),
+            _ => None,
+        })
+        .collect();
     let mut p = Parser {
-        toks: lex(src)?,
+        toks,
         i: 0,
         src,
+        type_names,
     };
     let mut prog = Program {
+        types: vec![],
         funcs: vec![],
         tests: vec![],
     };
     loop {
         if matches!(p.peek(), Tok::Eof) {
             break;
+        } else if p.is_kw("type") {
+            prog.types.push(p.type_decl()?);
         } else if p.is_kw("fn") {
             prog.funcs.push(p.func()?);
         } else if p.is_kw("test") {
             prog.tests.push(p.test()?);
         } else {
             return Err(p.err(format!(
-                "expected `fn` or `test` at top level, found {}",
+                "expected `type`, `fn` or `test` at top level, found {}",
                 p.describe()
             )));
         }
@@ -38,6 +55,7 @@ struct Parser<'a> {
     toks: Vec<Token>,
     i: usize,
     src: &'a str,
+    type_names: std::collections::HashSet<String>,
 }
 
 fn bx(e: Expr) -> Box<Expr> {
@@ -180,6 +198,46 @@ impl<'a> Parser<'a> {
         })
     }
 
+    fn type_decl(&mut self) -> Result<TypeDecl, Error> {
+        let pos = self.pos();
+        self.bump();
+        let (name, npos) = self.ident()?;
+        if BUILTIN_TYPES.contains(&name.as_str()) {
+            return Err(Error::new(
+                "syntax",
+                npos,
+                format!("`{}` is a built-in type and cannot be redefined", name),
+            ));
+        }
+        if !name.starts_with(|c: char| c.is_ascii_uppercase()) {
+            return Err(Error::new(
+                "syntax",
+                npos,
+                format!("type names start with a capital letter: `{}`", name),
+            )
+            .hint(format!(
+                "write `type {}{} {{ ... }}`",
+                name[..1].to_uppercase(),
+                &name[1..]
+            )));
+        }
+        self.expect_sym("{")?;
+        let mut fields = vec![];
+        while !self.is_sym("}") {
+            let (f, fpos) = self.ident()?;
+            if !self.eat_sym(":") {
+                return Err(
+                    Error::new("syntax", fpos, format!("field `{}` has no type", f))
+                        .hint(format!("write `{}: Int` (or another type)", f)),
+                );
+            }
+            fields.push((f, self.ty()?, fpos));
+            self.eat_sym(",");
+        }
+        self.bump();
+        Ok(TypeDecl { name, fields, pos })
+    }
+
     fn test(&mut self) -> Result<Test, Error> {
         self.bump();
         let name = match self.peek().clone() {
@@ -235,9 +293,13 @@ impl<'a> Parser<'a> {
                     Type::List(Box::new(Type::Any))
                 }
             }
+            _ if self.type_names.contains(&n) => Type::Record(n),
             _ => {
-                return Err(Error::new("syntax", pos, format!("unknown type `{}`", n))
-                    .hint("available types: Int, Str, Bool, Unit, List[T], Any"))
+                return Err(
+                    Error::new("syntax", pos, format!("unknown type `{}`", n)).hint(
+                        "available types: Int, Str, Bool, Unit, List[T], Any, and your own `type`s",
+                    ),
+                )
             }
         })
     }
@@ -300,7 +362,22 @@ impl<'a> Parser<'a> {
                 self.bump();
                 return Ok(Stmt::Assign(n, self.expr()?, pos));
             }
-            return Err(self.err("can only assign to a variable name"));
+            // `p.a.b = e`: collect the field path back to the variable.
+            let mut path = vec![];
+            let mut cur = &e;
+            while let ExprKind::Field(target, f) = &cur.kind {
+                path.push((f.clone(), cur.pos));
+                cur = target;
+            }
+            if let (ExprKind::Var(n), false) = (&cur.kind, path.is_empty()) {
+                let n = n.clone();
+                path.reverse();
+                self.bump();
+                return Ok(Stmt::SetField(n, path, self.expr()?, pos));
+            }
+            return Err(
+                self.err("can only assign to a variable or a field, like `x = ...` or `p.x = ...`")
+            );
         }
         Ok(Stmt::Expr(e))
     }
@@ -424,13 +501,19 @@ impl<'a> Parser<'a> {
     fn postfix(&mut self) -> Result<Expr, Error> {
         let s = self.i;
         let mut e = self.primary()?;
-        while self.is_sym("[") && !self.tok().nl_before {
-            self.bump();
-            let idx = self.expr()?;
-            self.expect_sym("]")?;
-            e = self.mk(ExprKind::Index(bx(e), bx(idx)), s);
+        loop {
+            if self.is_sym("[") && !self.tok().nl_before {
+                self.bump();
+                let idx = self.expr()?;
+                self.expect_sym("]")?;
+                e = self.mk(ExprKind::Index(bx(e), bx(idx)), s);
+            } else if self.eat_sym(".") {
+                let (f, _) = self.ident()?;
+                e = self.mk(ExprKind::Field(bx(e), f), s);
+            } else {
+                return Ok(e);
+            }
         }
-        Ok(e)
     }
 
     fn primary(&mut self) -> Result<Expr, Error> {
@@ -454,6 +537,17 @@ impl<'a> Parser<'a> {
                     }
                     self.expect_sym(")")?;
                     Ok(self.mk(ExprKind::Call(x, args), s))
+                } else if self.type_names.contains(&x) && self.is_sym("{") {
+                    self.bump();
+                    let mut fields = vec![];
+                    while !self.is_sym("}") {
+                        let (f, fpos) = self.ident()?;
+                        self.expect_sym(":")?;
+                        fields.push((f, self.expr()?, fpos));
+                        self.eat_sym(",");
+                    }
+                    self.bump();
+                    Ok(self.mk(ExprKind::Record(x, fields), s))
                 } else {
                     Ok(self.mk(ExprKind::Var(x), s))
                 }

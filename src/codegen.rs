@@ -16,6 +16,9 @@ pub fn emit_c(p: &Program, types: &Types, file: &str, src: &str) -> Result<Strin
     let mut g = Gen {
         types,
         funcs: p.funcs.iter().map(|f| (f.name.as_str(), f)).collect(),
+        records: p.types.iter().map(|t| (t.name.as_str(), t)).collect(),
+        rec_started: Default::default(),
+        var_types: HashMap::new(),
         out: String::new(),
         ind: 0,
         n: 0,
@@ -40,6 +43,11 @@ pub fn emit_c(p: &Program, types: &Types, file: &str, src: &str) -> Result<Strin
         ));
     }
 
+    for t in &p.types {
+        for (_, ft, pos) in &t.fields {
+            g.ctype(ft, *pos)?;
+        }
+    }
     let mut protos = String::new();
     for f in &p.funcs {
         let (ret, params) = g.signature(f)?;
@@ -64,6 +72,10 @@ pub fn emit_c(p: &Program, types: &Types, file: &str, src: &str) -> Result<Strin
     c += "    \"\";\n\n";
     c += RUNTIME;
     c += "\n";
+    // Records can refer to each other (e.g. through lists), so declare all descriptors first.
+    for t in &p.types {
+        c += &format!("static const tn_type TY_r{};\n", t.name);
+    }
     for (_, def) in &g.tydefs {
         c += def;
         c += "\n";
@@ -141,6 +153,7 @@ fn from_val(t: &Type, v: &str) -> String {
         Type::Bool => format!("({}).b", v),
         Type::Unit => "(tn_unit)0".into(),
         Type::Str => format!("((tn_str *)({}).p)", v),
+        Type::Record(_) => format!("((tn_rec *)({}).p)", v),
         _ => format!("((tn_list *)({}).p)", v),
     }
 }
@@ -160,6 +173,10 @@ struct Gen<'a> {
     n: usize,
     /// Glyph variable name -> C variable name, innermost scope last.
     scopes: Vec<HashMap<String, String>>,
+    /// C variable name -> Glyph type. C names are unique within a function.
+    var_types: HashMap<String, Type>,
+    records: HashMap<&'a str, &'a TypeDecl>,
+    rec_started: std::collections::HashSet<String>,
     lits: Vec<String>,
     lit_ids: HashMap<String, usize>,
     /// Type descriptors for list types, in dependency order.
@@ -194,6 +211,7 @@ impl<'a> Gen<'a> {
                 self.ctype(x, pos)?;
                 "tn_list *"
             }
+            Type::Record(_) => "tn_rec *",
             Type::Any => {
                 return Err(Error::new(
                     "compile",
@@ -216,6 +234,39 @@ impl<'a> Gen<'a> {
                 let name = format!("TY_l{}", &inner[4..]);
                 if !self.tydefs.iter().any(|(n, _)| *n == name) {
                     let def = format!("static const tn_type {} = {{TN_LIST, {}}};", name, inner);
+                    self.tydefs.push((name.clone(), def));
+                }
+                name
+            }
+            Type::Record(n) => {
+                let name = format!("TY_r{}", n);
+                // Mark first: a record may contain itself through a list.
+                if self.rec_started.insert(n.clone()) {
+                    let decl = self.records[n.as_str()];
+                    let mut ftypes = vec![];
+                    for (_, ft, _) in &decl.fields {
+                        ftypes.push(self.tydesc(ft));
+                    }
+                    let def = if decl.fields.is_empty() {
+                        format!(
+                            "static const tn_type {} = {{TN_RECORD, 0, {}, 0, 0, 0}};",
+                            name,
+                            c_str(n)
+                        )
+                    } else {
+                        let fnames: Vec<String> = decl.fields.iter().map(|f| c_str(&f.0)).collect();
+                        format!(
+                            "static const char *const FN_{n}[] = {{{}}};\n\
+                             static const tn_type *const FT_{n}[] = {{{}}};\n\
+                             static const tn_type {} = {{TN_RECORD, 0, {}, {}, FN_{n}, FT_{n}}};",
+                            fnames.join(", "),
+                            ftypes.join(", "),
+                            name,
+                            c_str(n),
+                            decl.fields.len(),
+                            n = n
+                        )
+                    };
                     self.tydefs.push((name.clone(), def));
                 }
                 name
@@ -280,6 +331,10 @@ impl<'a> Gen<'a> {
             plist(&params)
         ));
         self.ind = 1;
+        for p in &f.params {
+            self.var_types.insert(format!("p_{}", p.name), p.ty.clone());
+        }
+        self.var_types.insert("result_".into(), f.ret.clone());
         self.scopes = vec![param_scope.clone()];
         self.block(&f.body)?;
         if f.ret == Type::Unit {
@@ -389,7 +444,15 @@ impl<'a> Gen<'a> {
                 let ct = self.ctype(&t, e.pos)?;
                 let v = self.fresh(&format!("v_{}_", n));
                 self.line(format!("{} {} = {};", ct, v, a));
+                self.var_types.insert(v.clone(), t);
                 self.scopes.last_mut().unwrap().insert(n.clone(), v);
+            }
+            Stmt::SetField(n, path, e, _) => {
+                let a = self.expr(e)?;
+                let v = self.lookup(n);
+                let t = self.var_types[&v].clone();
+                let updated = self.set_path(&v, &t, path, &a)?;
+                self.line(format!("{} = {};", v, updated));
             }
             Stmt::Assign(n, e, _) => {
                 let a = self.expr(e)?;
@@ -437,6 +500,7 @@ impl<'a> Gen<'a> {
                 let v = self.fresh(&format!("v_{}_", n));
                 let item = from_val(&elem, &format!("tn_list_item({}, {})", it, i));
                 self.line(format!("{} {} = {};", ct, v, item));
+                self.var_types.insert(v.clone(), elem.clone());
                 self.scopes.push([(n.clone(), v)].into());
                 self.block(body)?;
                 self.scopes.pop();
@@ -539,6 +603,38 @@ impl<'a> Gen<'a> {
                 let init = self.binop(*op, &lt, &a, &b, e)?;
                 self.tmp(&t, e.pos, init)?
             }
+            ExprKind::Record(name, fields) => {
+                // Evaluate in source order, store in declaration order.
+                let mut atoms = HashMap::new();
+                for (f, fe, _) in fields {
+                    let a = self.expr(fe)?;
+                    atoms.insert(f.as_str(), a);
+                }
+                let decl = self.records[name.as_str()];
+                let vals: Vec<String> = decl
+                    .fields
+                    .iter()
+                    .map(|(f, ft, _)| to_val(ft, &atoms[f.as_str()]))
+                    .collect();
+                let init = if vals.is_empty() {
+                    "tn_rec_new(0, NULL)".to_string()
+                } else {
+                    format!(
+                        "tn_rec_new({}, (tn_val[]){{{}}})",
+                        vals.len(),
+                        vals.join(", ")
+                    )
+                };
+                self.tmp(&t, e.pos, init)?
+            }
+            ExprKind::Field(target, f) => {
+                let a = self.expr(target)?;
+                let Type::Record(rn) = self.ty(target) else {
+                    return Err(Error::new("compile", e.pos, "field access on a non-record"));
+                };
+                let (i, _) = self.records[rn.as_str()].field(f).expect("checked");
+                self.tmp(&t, e.pos, from_val(&t, &format!("{}->f[{}]", a, i)))?
+            }
             ExprKind::Index(target, idx) => {
                 let (a, i) = (self.expr(target)?, self.expr(idx)?);
                 let init = match self.ty(target) {
@@ -567,6 +663,37 @@ impl<'a> Gen<'a> {
         })
     }
 
+    /// A copy of record `cur` (of type `t`) with the field at `path` set to `val`.
+    fn set_path(
+        &mut self,
+        cur: &str,
+        t: &Type,
+        path: &[(String, Pos)],
+        val: &str,
+    ) -> Result<String, Error> {
+        let Type::Record(rn) = t else {
+            return Err(Error::new(
+                "compile",
+                path[0].1,
+                "field assignment on a non-record",
+            ));
+        };
+        let (f, pos) = &path[0];
+        let (i, ft) = self.records[rn.as_str()].field(f).expect("checked");
+        let ft = ft.clone();
+        let new = if path.len() == 1 {
+            val.to_string()
+        } else {
+            let inner = self.tmp(&ft, *pos, from_val(&ft, &format!("{}->f[{}]", cur, i)))?;
+            self.set_path(&inner, &ft, &path[1..], val)?
+        };
+        self.tmp(
+            t,
+            *pos,
+            format!("tn_rec_set({}, {}, {})", cur, i, to_val(&ft, &new)),
+        )
+    }
+
     fn binop(&mut self, op: BinOp, lt: &Type, a: &str, b: &str, e: &Expr) -> Result<String, Error> {
         use BinOp::*;
         let checked =
@@ -582,7 +709,7 @@ impl<'a> Gen<'a> {
             (Eq | Ne, _) => {
                 let eq = match lt {
                     Type::Str => format!("tn_str_eq({}, {})", a, b),
-                    Type::List(_) => {
+                    Type::List(_) | Type::Record(_) => {
                         let d = self.tydesc(lt);
                         format!("tn_eq({}, {}, {})", to_val(lt, a), to_val(lt, b), d)
                     }

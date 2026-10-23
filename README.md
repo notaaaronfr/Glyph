@@ -123,11 +123,12 @@ source.gly → lexer → parser → checker (names, types, effects) ─┬→ in
                                                                └→ codegen → C → cc -O2 → executable
 ```
 
-## Language reference (v0.3)
+## Language reference (v0.4)
 
 | Feature | Syntax |
 |---|---|
-| Types | `Int` (64-bit, overflow is an error), `Str`, `Bool`, `Unit`, `List[T]`, `Any` (interpreter only) |
+| Types | `Int` (64-bit, overflow is an error), `Str`, `Bool`, `Unit`, `List[T]`, records, `Any` (interpreter only) |
+| Records | `type Point { x: Int, y: Int }`, `Point { x: 1, y: 2 }`, `p.x`, `p.x = 5`, `line.to.y = 3` |
 | Function | `fn name(a: Int) -> Int uses io requires ... ensures ... { ... }` |
 | Variables | `let x = 1`, `let xs: List[Int] = []`, `x = x + 1` |
 | Control flow | `if / else if / else`, `while`, `for x in list_or_string`, `return` |
@@ -136,7 +137,26 @@ source.gly → lexer → parser → checker (names, types, effects) ─┬→ in
 | Pure built-ins | `len str int abs push range join split contains` |
 | Effectful built-ins | `print input` (io), `read_file write_file` (fs), `now` (time), `random` (rand) |
 
-Contracts must be pure. Comments start with `#`. There are no semicolons; newlines separate statements. Lists are values: `push(xs, v)` returns a new list and never changes `xs` (it's still O(1)).
+Contracts must be pure, and `ensures` sees the arguments as they were passed in, even if the body reassigns them. Comments start with `#`. There are no semicolons; newlines separate statements.
+
+Lists and records are values: `push(xs, v)` returns a new list and never changes `xs` (it's still O(1)), and `q = p` followed by `q.x = 5` leaves `p` unchanged. `==` compares contents.
+
+```python
+type Point {
+  x: Int
+  y: Int
+}
+
+type Line { from: Point, to: Point }
+
+fn move_right(p: Point, by: Int) -> Point
+  requires by >= 0
+  ensures result.x == p.x + by
+{
+  p.x = p.x + by
+  return p
+}
+```
 
 ## Status and roadmap
 
@@ -144,7 +164,8 @@ Glyph is **early and experimental**: expect breaking changes. Natively compiled 
 
 - [x] Interpreter, static types, effects, contracts, tests, JSON diagnostics
 - [x] Native compiler with identical behaviour
-- [ ] Records and enums, modules
+- [x] Records
+- [ ] Enums and pattern matching, modules
 - [ ] Memory management for native code
 - [x] `glyph fix`: AI repair loop. Fixes are accepted only if they type-check, add no effects, keep every contract and test, and pass
 - [ ] `uses ai`: model calls as a typed, declared effect

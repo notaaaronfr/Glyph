@@ -1,0 +1,18 @@
+exit: 1
+--- stdout ---
+evaluating 2
+evaluating 1
+Point { x: 1, y: 2 } 1 2
+p is unchanged: Point { x: 1, y: 2 } q: Point { x: 100, y: 2 }
+Line { from: Point { x: 1, y: 2 }, to: Point { x: 4, y: 6 }, label: "diagonal" }
+length squared: 25
+Point { x: 4, y: 10 } taller 73
+tree sum: 10
+[Point { x: 0, y: 0 }, Point { x: 1, y: 2 }, Point { x: 6, y: 2 }] 3
+true true true
+Nothing {} true
+--- stderr ---
+tests/cases/records.gly:70:9: contract error: precondition of `move_right` violated: `by >= 0`
+70 |   print(move_right(p, -1))
+   |         ^
+  hint: called with p = Point { x: 1, y: 2 }, by = -1

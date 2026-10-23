@@ -452,6 +452,9 @@ time (now), rand (random). Calling a function counts as performing its effects. 
 `while c { }`, `for x in list_or_string { }`, `return e`, `assert c`. No semicolons, no `break`/`continue`.
 - Operators: + - * / % (Int; + also joins Str and List), == != < <= > >=, and, or, not, xs[i].
 - Pure built-ins: len, str, int, abs, push (returns a new list), range, join, split, contains.
+- Records: `type Point { x: Int, y: Int }` (fields separated by commas or newlines), \
+literals `Point { x: 1, y: 2 }` (every field required), access `p.x`, update `p.x = 5` (records are \
+values: this updates only `p`), structural `==`.
 - Tests: `test \"name\" { assert ... }`.
 
 Glyph verifies every fix you propose and rejects it if it adds an effect the original did \

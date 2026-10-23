@@ -1,0 +1,27 @@
+exit: 1
+--- stdout ---
+--- stderr ---
+tests/cases/record_errors.gly:8:11: type error: `Point` is missing field(s): y
+8 |   let a = Point { x: 1 }
+  |           ^
+  hint: every field must be given a value
+tests/cases/record_errors.gly:9:31: type error: `Point` has no field `z`
+9 |   let b = Point { x: 1, y: 2, z: 3 }
+  |                               ^
+  hint: its fields are: x, y
+tests/cases/record_errors.gly:10:22: type error: field `x` of `Point` must be Int, found Str
+10 |   let c = Point { x: "one", y: 2 }
+   |                      ^
+tests/cases/record_errors.gly:11:31: name error: field `x` is given twice
+11 |   let d = Point { x: 1, y: 2, x: 3 }
+   |                               ^
+tests/cases/record_errors.gly:12:9: type error: `Point` has no field `z`
+12 |   print(a.z)
+   |         ^
+  hint: its fields are: x, y
+tests/cases/record_errors.gly:14:9: type error: Int has no fields, so `.x` is not allowed
+14 |   print(n.x)
+   |         ^
+tests/cases/record_errors.gly:15:9: type error: the new value of `a.x` must be Int, found Str
+15 |   a.x = "two"
+   |         ^

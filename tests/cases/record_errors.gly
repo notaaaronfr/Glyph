@@ -1,0 +1,16 @@
+# Record mistakes, all caught before the program runs.
+type Point {
+  x: Int
+  y: Int
+}
+
+fn main() uses io {
+  let a = Point { x: 1 }
+  let b = Point { x: 1, y: 2, z: 3 }
+  let c = Point { x: "one", y: 2 }
+  let d = Point { x: 1, y: 2, x: 3 }
+  print(a.z)
+  let n = 5
+  print(n.x)
+  a.x = "two"
+}

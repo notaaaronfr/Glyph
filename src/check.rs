@@ -64,7 +64,27 @@ pub fn check(p: &Program) -> Result<Types, Vec<Error>> {
         in_fn: false,
         ret: Type::Unit,
         types: HashMap::new(),
+        records: HashMap::new(),
     };
+    for t in &p.types {
+        if c.records.insert(&t.name, t).is_some() {
+            c.err(
+                "name",
+                t.pos,
+                format!("type `{}` is defined more than once", t.name),
+            );
+        }
+        let mut seen = HashSet::new();
+        for (f, _, pos) in &t.fields {
+            if !seen.insert(f) {
+                c.err(
+                    "name",
+                    *pos,
+                    format!("field `{}` appears twice in `{}`", f, t.name),
+                );
+            }
+        }
+    }
     for f in &p.funcs {
         if builtin(&f.name).is_some() {
             c.errors.push(Error::new(
@@ -120,6 +140,7 @@ struct Checker<'a> {
     in_fn: bool,
     ret: Type,
     types: HashMap<*const Expr, Type>,
+    records: HashMap<&'a str, &'a TypeDecl>,
 }
 
 impl<'a> Checker<'a> {
@@ -246,6 +267,23 @@ impl<'a> Checker<'a> {
                     );
                 }
             },
+            Stmt::SetField(n, path, e, pos) => {
+                let Some(mut t) = self.lookup(n) else {
+                    self.expr(e, None);
+                    self.err(
+                        "name",
+                        *pos,
+                        format!("assignment to undefined variable `{}`", n),
+                    );
+                    return;
+                };
+                let mut what = n.clone();
+                for (f, fpos) in path {
+                    t = self.field_type(&t, f, *fpos);
+                    what = format!("{}.{}", what, f);
+                }
+                self.expect(e, &t, &format!("the new value of `{}`", what));
+            }
             Stmt::Expr(e) => {
                 self.expr(e, None);
             }
@@ -395,7 +433,80 @@ impl<'a> Checker<'a> {
                 }
             }
             ExprKind::Call(name, args) => self.call(name, args, e.pos),
+            ExprKind::Field(target, f) => {
+                let t = self.expr(target, None);
+                self.field_type(&t, f, e.pos)
+            }
+            ExprKind::Record(name, fields) => {
+                let Some(decl) = self.records.get(name.as_str()).copied() else {
+                    return Any;
+                };
+                let mut seen = HashSet::new();
+                for (f, fe, fpos) in fields {
+                    if !seen.insert(f.as_str()) {
+                        self.err("name", *fpos, format!("field `{}` is given twice", f));
+                    }
+                    match decl.field(f) {
+                        Some((_, ft)) => {
+                            let ft = ft.clone();
+                            self.expect(fe, &ft, &format!("field `{}` of `{}`", f, name));
+                        }
+                        None => {
+                            self.expr(fe, None);
+                            self.errors.push(self.no_field(decl, f, *fpos));
+                        }
+                    }
+                }
+                let missing: Vec<&str> = decl
+                    .fields
+                    .iter()
+                    .map(|f| f.0.as_str())
+                    .filter(|f| !seen.contains(f))
+                    .collect();
+                if !missing.is_empty() {
+                    self.errors.push(
+                        Error::new(
+                            "type",
+                            e.pos,
+                            format!("`{}` is missing field(s): {}", name, missing.join(", ")),
+                        )
+                        .hint("every field must be given a value"),
+                    );
+                }
+                Record(name.clone())
+            }
         }
+    }
+
+    /// The type of field `f` of a value of type `t`, reporting an error if there is none.
+    fn field_type(&mut self, t: &Type, f: &str, pos: Pos) -> Type {
+        match t {
+            Type::Any => Type::Any,
+            Type::Record(n) => match self.records.get(n.as_str()).copied() {
+                Some(decl) => match decl.field(f) {
+                    Some((_, ft)) => ft.clone(),
+                    None => {
+                        self.errors.push(self.no_field(decl, f, pos));
+                        Type::Any
+                    }
+                },
+                None => Type::Any,
+            },
+            _ => {
+                self.err(
+                    "type",
+                    pos,
+                    format!("{} has no fields, so `.{}` is not allowed", t, f),
+                );
+                Type::Any
+            }
+        }
+    }
+
+    fn no_field(&self, decl: &TypeDecl, f: &str, pos: Pos) -> Error {
+        let names: Vec<&str> = decl.fields.iter().map(|f| f.0.as_str()).collect();
+        Error::new("type", pos, format!("`{}` has no field `{}`", decl.name, f))
+            .hint(format!("its fields are: {}", names.join(", ")))
     }
 
     fn binary(&mut self, op: BinOp, lt: &Type, rt: &Type, e: &Expr) -> Type {

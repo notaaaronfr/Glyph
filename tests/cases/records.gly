@@ -1,0 +1,71 @@
+# Records: declaration, literals, fields, nested updates, value semantics, equality,
+# recursion through lists, contracts, and evaluation order of field expressions.
+
+type Point {
+  x: Int
+  y: Int
+}
+
+type Line { from: Point, to: Point, label: Str }
+
+type Tree {
+  value: Int
+  children: List[Tree]
+}
+
+type Nothing {}
+
+fn noisy(n: Int) -> Int uses io {
+  print("evaluating", n)
+  return n
+}
+
+fn length2(l: Line) -> Int
+  ensures result >= 0
+{
+  let dx = l.to.x - l.from.x
+  let dy = l.to.y - l.from.y
+  return dx * dx + dy * dy
+}
+
+fn sum(t: Tree) -> Int {
+  let total = t.value
+  for c in t.children {
+    total = total + sum(c)
+  }
+  return total
+}
+
+fn move_right(p: Point, by: Int) -> Point
+  requires by >= 0
+  ensures result.x == p.x + by
+{
+  p.x = p.x + by
+  return p
+}
+
+fn main() uses io {
+  let p = Point { y: noisy(2), x: noisy(1) }
+  print(p, p.x, p.y)
+
+  let q = p
+  q.x = 100
+  print("p is unchanged:", p, "q:", q)
+
+  let l = Line { from: p, to: Point { x: 4, y: 6 }, label: "diagonal" }
+  print(l)
+  print("length squared:", length2(l))
+  l.to.y = 10
+  l.label = "taller"
+  print(l.to, l.label, length2(l))
+
+  let t = Tree { value: 1, children: [Tree { value: 2, children: [] }, Tree { value: 3, children: [Tree { value: 4, children: [] }] }] }
+  print("tree sum:", sum(t))
+
+  let points = [Point { x: 0, y: 0 }, p]
+  points = push(points, move_right(p, 5))
+  print(points, len(points))
+  print(p == Point { x: 1, y: 2 }, p != q, contains(points, Point { x: 6, y: 2 }))
+  print(str(Nothing {}), [Nothing {}] == [Nothing {}])
+  print(move_right(p, -1))
+}

@@ -9,6 +9,8 @@ pub enum Type {
     Unit,
     Any,
     List(Box<Type>),
+    /// A user-defined record type, by name.
+    Record(String),
 }
 
 impl fmt::Display for Type {
@@ -20,6 +22,7 @@ impl fmt::Display for Type {
             Type::Unit => write!(f, "Unit"),
             Type::Any => write!(f, "Any"),
             Type::List(t) => write!(f, "List[{}]", t),
+            Type::Record(n) => write!(f, "{}", n),
         }
     }
 }
@@ -87,12 +90,18 @@ pub enum ExprKind {
     Binary(BinOp, Box<Expr>, Box<Expr>),
     Call(String, Vec<Expr>),
     Index(Box<Expr>, Box<Expr>),
+    /// `Point { x: 1, y: 2 }`: fields in source order.
+    Record(String, Vec<(String, Expr, Pos)>),
+    /// `p.x`
+    Field(Box<Expr>, String),
 }
 
 #[derive(Debug, Clone)]
 pub enum Stmt {
     Let(String, Option<Type>, Expr),
     Assign(String, Expr, Pos),
+    /// `p.x = e` or `p.a.b = e`: replaces the variable with an updated copy.
+    SetField(String, Vec<(String, Pos)>, Expr, Pos),
     Expr(Expr),
     If(Expr, Vec<Stmt>, Option<Vec<Stmt>>),
     While(Expr, Vec<Stmt>),
@@ -129,7 +138,24 @@ pub struct Test {
 }
 
 #[derive(Debug, Clone)]
+pub struct TypeDecl {
+    pub name: String,
+    pub fields: Vec<(String, Type, Pos)>,
+    pub pos: Pos,
+}
+
+impl TypeDecl {
+    pub fn field(&self, name: &str) -> Option<(usize, &Type)> {
+        self.fields
+            .iter()
+            .position(|f| f.0 == name)
+            .map(|i| (i, &self.fields[i].1))
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Program {
+    pub types: Vec<TypeDecl>,
     pub funcs: Vec<Func>,
     pub tests: Vec<Test>,
 }
