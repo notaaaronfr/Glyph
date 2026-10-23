@@ -1,0 +1,35 @@
+exit: 1
+--- stdout ---
+--- stderr ---
+tests/cases/enum_errors.gly:8:14: name error: the name `Red` is defined more than once
+8 | enum Other { Red }
+  |              ^
+tests/cases/enum_errors.gly:11:3: type error: `match` doesn't handle: Yellow
+11 |   match l {
+   |   ^
+  hint: add an arm for each, or `_ => { ... }` for the rest
+tests/cases/enum_errors.gly:22:5: type error: `Blue` is not a variant of `Light`
+22 |     Blue => { print("?") }
+   |     ^
+  hint: its variants are: Red, Yellow, Green
+tests/cases/enum_errors.gly:23:5: type error: `Red` is already matched by an earlier arm
+23 |     Red => { print("again") }
+   |     ^
+tests/cases/enum_errors.gly:25:5: type error: the `Yellow` arm can never run
+25 |     Yellow => { print("slow") }
+   |     ^
+  hint: the `_` arm above it already matches everything
+tests/cases/enum_errors.gly:28:13: type error: `Green` has no field `minutes`
+28 |     Green { minutes } => { print(minutes) }
+   |             ^
+tests/cases/enum_errors.gly:31:9: type error: can't read `.seconds` directly from an enum `Light`
+31 |   print(l.seconds)
+   |         ^
+  hint: use `match` to find out which variant it is and bind its fields
+tests/cases/enum_errors.gly:32:9: type error: `match` needs an enum value, found Int
+32 |   match 5 {
+   |         ^
+tests/cases/enum_errors.gly:35:11: type error: `Green` is missing field(s): seconds
+35 |   let g = Green {}
+   |           ^
+  hint: every field must be given a value

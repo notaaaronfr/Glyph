@@ -16,6 +16,7 @@ pub fn emit_c(p: &Program, types: &Types, file: &str, src: &str) -> Result<Strin
     let mut g = Gen {
         types,
         funcs: p.funcs.iter().map(|f| (f.name.as_str(), f)).collect(),
+        prog: p,
         records: p.types.iter().map(|t| (t.name.as_str(), t)).collect(),
         rec_started: Default::default(),
         var_types: HashMap::new(),
@@ -43,10 +44,13 @@ pub fn emit_c(p: &Program, types: &Types, file: &str, src: &str) -> Result<Strin
         ));
     }
 
-    for t in &p.types {
-        for (_, ft, pos) in &t.fields {
-            g.ctype(ft, *pos)?;
-        }
+    let variant_fields = p
+        .enums
+        .iter()
+        .flat_map(|e| &e.variants)
+        .flat_map(|v| &v.fields);
+    for (_, ft, pos) in p.types.iter().flat_map(|t| &t.fields).chain(variant_fields) {
+        g.ctype(ft, *pos)?;
     }
     let mut protos = String::new();
     for f in &p.funcs {
@@ -75,6 +79,9 @@ pub fn emit_c(p: &Program, types: &Types, file: &str, src: &str) -> Result<Strin
     // Records can refer to each other (e.g. through lists), so declare all descriptors first.
     for t in &p.types {
         c += &format!("static const tn_type TY_r{};\n", t.name);
+    }
+    for e in &p.enums {
+        c += &format!("static const tn_type TY_e{};\n", e.name);
     }
     for (_, def) in &g.tydefs {
         c += def;
@@ -154,6 +161,7 @@ fn from_val(t: &Type, v: &str) -> String {
         Type::Unit => "(tn_unit)0".into(),
         Type::Str => format!("((tn_str *)({}).p)", v),
         Type::Record(_) => format!("((tn_rec *)({}).p)", v),
+        Type::Enum(_) => format!("((tn_enum *)({}).p)", v),
         _ => format!("((tn_list *)({}).p)", v),
     }
 }
@@ -176,6 +184,7 @@ struct Gen<'a> {
     /// C variable name -> Glyph type. C names are unique within a function.
     var_types: HashMap<String, Type>,
     records: HashMap<&'a str, &'a TypeDecl>,
+    prog: &'a Program,
     rec_started: std::collections::HashSet<String>,
     lits: Vec<String>,
     lit_ids: HashMap<String, usize>,
@@ -212,6 +221,7 @@ impl<'a> Gen<'a> {
                 "tn_list *"
             }
             Type::Record(_) => "tn_rec *",
+            Type::Enum(_) => "tn_enum *",
             Type::Any => {
                 return Err(Error::new(
                     "compile",
@@ -268,6 +278,55 @@ impl<'a> Gen<'a> {
                         )
                     };
                     self.tydefs.push((name.clone(), def));
+                }
+                name
+            }
+            Type::Enum(n) => {
+                let name = format!("TY_e{}", n);
+                if self.rec_started.insert(n.clone()) {
+                    let decl = self
+                        .prog
+                        .enums
+                        .iter()
+                        .find(|e| &e.name == n)
+                        .expect("checked");
+                    let mut defs = vec![];
+                    let mut variants = vec![];
+                    for v in &decl.variants {
+                        if v.fields.is_empty() {
+                            variants.push(format!("{{{}, 0, 0, 0}}", c_str(&v.name)));
+                            continue;
+                        }
+                        let mut ftypes = vec![];
+                        for (_, ft, _) in &v.fields {
+                            ftypes.push(self.tydesc(ft));
+                        }
+                        let fnames: Vec<String> = v.fields.iter().map(|f| c_str(&f.0)).collect();
+                        let id = format!("{}_{}", n, v.name);
+                        defs.push(format!(
+                            "static const char *const FN_{id}[] = {{{}}};\n\
+                             static const tn_type *const FT_{id}[] = {{{}}};",
+                            fnames.join(", "),
+                            ftypes.join(", "),
+                            id = id
+                        ));
+                        variants.push(format!(
+                            "{{{}, {}, FN_{id}, FT_{id}}}",
+                            c_str(&v.name),
+                            v.fields.len(),
+                            id = id
+                        ));
+                    }
+                    defs.push(format!(
+                        "static const tn_variant VR_{n}[] = {{{}}};\n\
+                         static const tn_type {} = {{TN_ENUM, 0, {}, {}, 0, 0, VR_{n}}};",
+                        variants.join(", "),
+                        name,
+                        c_str(n),
+                        decl.variants.len(),
+                        n = n
+                    ));
+                    self.tydefs.push((name.clone(), defs.join("\n")));
                 }
                 name
             }
@@ -446,6 +505,70 @@ impl<'a> Gen<'a> {
                 self.line(format!("{} {} = {};", ct, v, a));
                 self.var_types.insert(v.clone(), t);
                 self.scopes.last_mut().unwrap().insert(n.clone(), v);
+            }
+            Stmt::Match(scrutinee, arms, _) => {
+                let m = self.expr(scrutinee)?;
+                let Type::Enum(en) = self.ty(scrutinee) else {
+                    return Err(Error::new(
+                        "compile",
+                        scrutinee.pos,
+                        "`match` on a non-enum",
+                    ));
+                };
+                let decl = self
+                    .prog
+                    .enums
+                    .iter()
+                    .find(|e| e.name == en)
+                    .expect("checked");
+                for (k, arm) in arms.iter().enumerate() {
+                    let cond = match &arm.pattern {
+                        Pattern::Wildcard(_) => "1".to_string(),
+                        Pattern::Variant(v, _, _) => {
+                            let tag = decl
+                                .variants
+                                .iter()
+                                .position(|x| &x.name == v)
+                                .expect("checked");
+                            format!("{}->tag == {}", m, tag)
+                        }
+                    };
+                    self.line(format!(
+                        "{}if ({}) {{",
+                        if k == 0 { "" } else { "} else " },
+                        cond
+                    ));
+                    self.ind += 1;
+                    let mut scope = HashMap::new();
+                    if let Pattern::Variant(v, binds, _) = &arm.pattern {
+                        let var = decl
+                            .variants
+                            .iter()
+                            .find(|x| &x.name == v)
+                            .expect("checked");
+                        for (f, name, pos) in binds {
+                            let (i, ft) = var.field(f).expect("checked");
+                            let ft = ft.clone();
+                            let ct = self.ctype(&ft, *pos)?;
+                            let cv = self.fresh(&format!("v_{}_", name));
+                            self.line(format!(
+                                "{} {} = {};",
+                                ct,
+                                cv,
+                                from_val(&ft, &format!("{}->f[{}]", m, i))
+                            ));
+                            self.var_types.insert(cv.clone(), ft);
+                            scope.insert(name.clone(), cv);
+                        }
+                    }
+                    self.scopes.push(scope);
+                    self.block(&arm.body)?;
+                    self.scopes.pop();
+                    self.ind -= 1;
+                }
+                if !arms.is_empty() {
+                    self.line("}");
+                }
             }
             Stmt::SetField(n, path, e, _) => {
                 let a = self.expr(e)?;
@@ -627,6 +750,30 @@ impl<'a> Gen<'a> {
                 };
                 self.tmp(&t, e.pos, init)?
             }
+            ExprKind::Variant(name, fields) => {
+                let mut atoms = HashMap::new();
+                for (f, fe, _) in fields {
+                    let a = self.expr(fe)?;
+                    atoms.insert(f.as_str(), a);
+                }
+                let (decl, tag) = self.prog.variant(name).expect("checked");
+                let vals: Vec<String> = decl.variants[tag]
+                    .fields
+                    .iter()
+                    .map(|(f, ft, _)| to_val(ft, &atoms[f.as_str()]))
+                    .collect();
+                let init = if vals.is_empty() {
+                    format!("tn_enum_new({}, 0, NULL)", tag)
+                } else {
+                    format!(
+                        "tn_enum_new({}, {}, (tn_val[]){{{}}})",
+                        tag,
+                        vals.len(),
+                        vals.join(", ")
+                    )
+                };
+                self.tmp(&t, e.pos, init)?
+            }
             ExprKind::Field(target, f) => {
                 let a = self.expr(target)?;
                 let Type::Record(rn) = self.ty(target) else {
@@ -709,7 +856,7 @@ impl<'a> Gen<'a> {
             (Eq | Ne, _) => {
                 let eq = match lt {
                     Type::Str => format!("tn_str_eq({}, {})", a, b),
-                    Type::List(_) | Type::Record(_) => {
+                    Type::List(_) | Type::Record(_) | Type::Enum(_) => {
                         let d = self.tydesc(lt);
                         format!("tn_eq({}, {}, {})", to_val(lt, a), to_val(lt, b), d)
                     }

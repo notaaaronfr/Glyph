@@ -455,6 +455,9 @@ time (now), rand (random). Calling a function counts as performing its effects. 
 - Records: `type Point { x: Int, y: Int }` (fields separated by commas or newlines), \
 literals `Point { x: 1, y: 2 }` (every field required), access `p.x`, update `p.x = 5` (records are \
 values: this updates only `p`), structural `==`.
+- Enums: `enum Shape { Circle { radius: Int }, Empty }` (variants separated by commas or newlines); \
+values `Circle { radius: 2 }`, `Empty`. Read them with `match s { Circle { radius } => { ... } Empty => { ... } }`; \
+`match` must cover every variant or end with `_ => { ... }`; `Circle { radius: r }` binds `r`.
 - Tests: `test \"name\" { assert ... }`.
 
 Glyph verifies every fix you propose and rejects it if it adds an effect the original did \

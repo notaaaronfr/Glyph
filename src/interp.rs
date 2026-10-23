@@ -76,7 +76,16 @@ pub enum Value {
     Bool(bool),
     List(ListVal),
     Record(Rc<RecordVal>),
+    Enum(Rc<EnumVal>),
     Unit,
+}
+
+/// An enum value: which variant it is, and that variant's fields in declaration order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnumVal {
+    pub enum_name: String,
+    pub variant: String,
+    pub fields: Vec<(String, Value)>,
 }
 
 /// A record value. Fields are stored in declaration order; records are immutable,
@@ -104,6 +113,7 @@ impl Value {
             Value::Unit => "Unit".into(),
             Value::List(_) => "List".into(),
             Value::Record(r) => r.name.clone(),
+            Value::Enum(e) => e.enum_name.clone(),
         }
     }
 }
@@ -118,6 +128,15 @@ impl fmt::Display for Value {
             Value::List(xs) => {
                 let items: Vec<_> = xs.items().iter().map(|x| x.repr()).collect();
                 write!(f, "[{}]", items.join(", "))
+            }
+            Value::Enum(e) if e.fields.is_empty() => write!(f, "{}", e.variant),
+            Value::Enum(e) => {
+                let fields: Vec<_> = e
+                    .fields
+                    .iter()
+                    .map(|(n, v)| format!("{}: {}", n, v.repr()))
+                    .collect();
+                write!(f, "{} {{ {} }}", e.variant, fields.join(", "))
             }
             Value::Record(r) if r.fields.is_empty() => write!(f, "{} {{}}", r.name),
             Value::Record(r) => {
@@ -143,6 +162,7 @@ fn has_type(v: &Value, t: &Type) -> bool {
         // would make every call that passes a list O(n).
         (Type::List(_), Value::List(_)) => true,
         (Type::Record(n), Value::Record(r)) => *n == r.name,
+        (Type::Enum(n), Value::Enum(e)) => *n == e.enum_name,
         _ => false,
     }
 }
@@ -159,6 +179,7 @@ const MAX_DEPTH: usize = 10_000;
 pub struct Interp<'a> {
     funcs: HashMap<&'a str, &'a Func>,
     records: HashMap<&'a str, &'a TypeDecl>,
+    prog: &'a Program,
     scopes: Vec<HashMap<String, Value>>,
     depth: usize,
     rng: u64,
@@ -173,6 +194,7 @@ impl<'a> Interp<'a> {
         Interp {
             funcs: p.funcs.iter().map(|f| (f.name.as_str(), f)).collect(),
             records: p.types.iter().map(|t| (t.name.as_str(), t)).collect(),
+            prog: p,
             scopes: vec![HashMap::new()],
             depth: 0,
             rng: seed | 1,
@@ -344,6 +366,38 @@ impl<'a> Interp<'a> {
                     *slot = updated;
                 }
             }
+            Stmt::Match(scrutinee, arms, pos) => {
+                let Value::Enum(v) = self.eval(scrutinee)? else {
+                    return Err(Error::new(
+                        "type",
+                        scrutinee.pos,
+                        "`match` needs an enum value",
+                    ));
+                };
+                let arm = arms.iter().find(|a| match &a.pattern {
+                    Pattern::Wildcard(_) => true,
+                    Pattern::Variant(name, _, _) => *name == v.variant,
+                });
+                let Some(arm) = arm else {
+                    return Err(Error::new(
+                        "runtime",
+                        *pos,
+                        format!("no `match` arm for `{}`", v.variant),
+                    ));
+                };
+                let mut scope = HashMap::new();
+                if let Pattern::Variant(_, binds, _) = &arm.pattern {
+                    for (f, name, _) in binds {
+                        if let Some((_, val)) = v.fields.iter().find(|(n, _)| n == f) {
+                            scope.insert(name.clone(), val.clone());
+                        }
+                    }
+                }
+                self.scopes.push(scope);
+                let r = self.block(&arm.body);
+                self.scopes.pop();
+                return r;
+            }
             Stmt::Assign(n, e, pos) => {
                 let v = self.eval(e)?;
                 match self.scopes.iter_mut().rev().find_map(|s| s.get_mut(n)) {
@@ -487,6 +541,23 @@ impl<'a> Interp<'a> {
                     .collect();
                 Record(Rc::new(RecordVal {
                     name: name.clone(),
+                    fields,
+                }))
+            }
+            ExprKind::Variant(name, fields) => {
+                let mut vals = HashMap::new();
+                for (f, fe, _) in fields {
+                    vals.insert(f.as_str(), self.eval(fe)?);
+                }
+                let (decl, i) = self.prog.variant(name).expect("checked");
+                let fields = decl.variants[i]
+                    .fields
+                    .iter()
+                    .map(|(f, _, _)| (f.clone(), vals.remove(f.as_str()).unwrap_or(Unit)))
+                    .collect();
+                Enum(Rc::new(EnumVal {
+                    enum_name: decl.name.clone(),
+                    variant: name.clone(),
                     fields,
                 }))
             }

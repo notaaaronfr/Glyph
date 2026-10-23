@@ -1,0 +1,36 @@
+# Enum and match mistakes, all caught before the program runs.
+enum Light {
+  Red
+  Yellow
+  Green { seconds: Int }
+}
+
+enum Other { Red }
+
+fn action(l: Light) -> Str {
+  match l {
+    Red => { return "stop" }
+    Green { seconds } => { return "go" }
+  }
+  return "?"
+}
+
+fn main() uses io {
+  let l = Green { seconds: 5 }
+  match l {
+    Red => { print("stop") }
+    Blue => { print("?") }
+    Red => { print("again") }
+    _ => { print("other") }
+    Yellow => { print("slow") }
+  }
+  match l {
+    Green { minutes } => { print(minutes) }
+    _ => { print("x") }
+  }
+  print(l.seconds)
+  match 5 {
+    _ => { print("five") }
+  }
+  let g = Green {}
+}

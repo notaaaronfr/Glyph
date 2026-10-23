@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
 
 const USAGE: &str = "\
-Glyph 0.4 - a language AI can write and humans can trust
+Glyph 0.5 - a language AI can write and humans can trust
 
 usage: glyph <command> <file.gly> [options]
 

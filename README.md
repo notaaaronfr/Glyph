@@ -123,12 +123,14 @@ source.gly → lexer → parser → checker (names, types, effects) ─┬→ in
                                                                └→ codegen → C → cc -O2 → executable
 ```
 
-## Language reference (v0.4)
+## Language reference (v0.5)
 
 | Feature | Syntax |
 |---|---|
-| Types | `Int` (64-bit, overflow is an error), `Str`, `Bool`, `Unit`, `List[T]`, records, `Any` (interpreter only) |
+| Types | `Int` (64-bit, overflow is an error), `Str`, `Bool`, `Unit`, `List[T]`, records, enums, `Any` (interpreter only) |
 | Records | `type Point { x: Int, y: Int }`, `Point { x: 1, y: 2 }`, `p.x`, `p.x = 5`, `line.to.y = 3` |
+| Enums | `enum Shape { Circle { radius: Int }, Empty }`, `Circle { radius: 2 }`, `Empty` |
+| Match | `match s { Circle { radius } => { ... } Empty => { ... } }`, `Rect { w: width } => ...`, `_ => ...` |
 | Function | `fn name(a: Int) -> Int uses io requires ... ensures ... { ... }` |
 | Variables | `let x = 1`, `let xs: List[Int] = []`, `x = x + 1` |
 | Control flow | `if / else if / else`, `while`, `for x in list_or_string`, `return` |
@@ -158,6 +160,31 @@ fn move_right(p: Point, by: Int) -> Point
 }
 ```
 
+An enum value is one of several variants. `match` must handle every variant (or end with `_`), so adding a variant later flags every `match` that forgets it, before the program runs:
+
+```python
+enum Shape {
+  Circle { radius: Int }
+  Rect { w: Int, h: Int }
+  Empty
+}
+
+fn area(s: Shape) -> Int {
+  match s {
+    Circle { radius } => { return 3 * radius * radius }
+    Rect { w, h } => { return w * h }
+    Empty => { return 0 }
+  }
+}
+```
+
+```
+shapes.gly:9:3: type error: `match` doesn't handle: Triangle
+9 |   match s {
+  |   ^
+  hint: add an arm for each, or `_ => { ... }` for the rest
+```
+
 ## Status and roadmap
 
 Glyph is **early and experimental**: expect breaking changes. Natively compiled programs don't free memory yet.
@@ -165,7 +192,8 @@ Glyph is **early and experimental**: expect breaking changes. Natively compiled 
 - [x] Interpreter, static types, effects, contracts, tests, JSON diagnostics
 - [x] Native compiler with identical behaviour
 - [x] Records
-- [ ] Enums and pattern matching, modules
+- [x] Enums and exhaustive `match`
+- [ ] Generic types (`Option[T]`, `Result[T, E]`), modules
 - [ ] Memory management for native code
 - [x] `glyph fix`: AI repair loop. Fixes are accepted only if they type-check, add no effects, keep every contract and test, and pass
 - [ ] `uses ai`: model calls as a typed, declared effect

@@ -65,15 +65,43 @@ pub fn check(p: &Program) -> Result<Types, Vec<Error>> {
         ret: Type::Unit,
         types: HashMap::new(),
         records: HashMap::new(),
+        prog: p,
     };
-    for t in &p.types {
-        if c.records.insert(&t.name, t).is_some() {
+    // Every user-defined name (record, enum, variant) shares one namespace.
+    let mut names: HashMap<&str, Pos> = HashMap::new();
+    let all_names = p
+        .types
+        .iter()
+        .map(|t| (&t.name, t.pos))
+        .chain(p.enums.iter().map(|e| (&e.name, e.pos)))
+        .chain(
+            p.enums
+                .iter()
+                .flat_map(|e| e.variants.iter().map(|v| (&v.name, v.pos))),
+        );
+    for (n, pos) in all_names {
+        if names.insert(n, pos).is_some() {
             c.err(
                 "name",
-                t.pos,
-                format!("type `{}` is defined more than once", t.name),
+                pos,
+                format!("the name `{}` is defined more than once", n),
             );
         }
+    }
+    for v in p.enums.iter().flat_map(|e| &e.variants) {
+        let mut seen = HashSet::new();
+        for (f, _, pos) in &v.fields {
+            if !seen.insert(f) {
+                c.err(
+                    "name",
+                    *pos,
+                    format!("field `{}` appears twice in `{}`", f, v.name),
+                );
+            }
+        }
+    }
+    for t in &p.types {
+        c.records.insert(&t.name, t);
         let mut seen = HashSet::new();
         for (f, _, pos) in &t.fields {
             if !seen.insert(f) {
@@ -127,6 +155,8 @@ fn always_returns(stmts: &[Stmt]) -> bool {
     stmts.iter().any(|s| match s {
         Stmt::Return(..) => true,
         Stmt::If(_, t, Some(e)) => always_returns(t) && always_returns(e),
+        // The checker guarantees every `match` is exhaustive.
+        Stmt::Match(_, arms, _) => !arms.is_empty() && arms.iter().all(|a| always_returns(&a.body)),
         _ => false,
     })
 }
@@ -141,6 +171,7 @@ struct Checker<'a> {
     ret: Type,
     types: HashMap<*const Expr, Type>,
     records: HashMap<&'a str, &'a TypeDecl>,
+    prog: &'a Program,
 }
 
 impl<'a> Checker<'a> {
@@ -288,6 +319,7 @@ impl<'a> Checker<'a> {
                 self.expr(e, None);
             }
             Stmt::Assert(e) => self.cond(e),
+            Stmt::Match(e, arms, pos) => self.match_stmt(e, arms, *pos),
             Stmt::If(c, t, els) => {
                 self.cond(c);
                 self.block(t);
@@ -438,42 +470,171 @@ impl<'a> Checker<'a> {
                 self.field_type(&t, f, e.pos)
             }
             ExprKind::Record(name, fields) => {
-                let Some(decl) = self.records.get(name.as_str()).copied() else {
-                    return Any;
-                };
-                let mut seen = HashSet::new();
-                for (f, fe, fpos) in fields {
-                    if !seen.insert(f.as_str()) {
-                        self.err("name", *fpos, format!("field `{}` is given twice", f));
-                    }
-                    match decl.field(f) {
-                        Some((_, ft)) => {
-                            let ft = ft.clone();
-                            self.expect(fe, &ft, &format!("field `{}` of `{}`", f, name));
-                        }
-                        None => {
-                            self.expr(fe, None);
-                            self.errors.push(self.no_field(decl, f, *fpos));
-                        }
-                    }
-                }
-                let missing: Vec<&str> = decl
-                    .fields
-                    .iter()
-                    .map(|f| f.0.as_str())
-                    .filter(|f| !seen.contains(f))
-                    .collect();
-                if !missing.is_empty() {
-                    self.errors.push(
-                        Error::new(
-                            "type",
-                            e.pos,
-                            format!("`{}` is missing field(s): {}", name, missing.join(", ")),
-                        )
-                        .hint("every field must be given a value"),
-                    );
+                if let Some(decl) = self.records.get(name.as_str()).copied() {
+                    self.field_values(name, &decl.fields, fields, e.pos);
                 }
                 Record(name.clone())
+            }
+            ExprKind::Variant(name, fields) => {
+                let Some((decl, i)) = self.prog.variant(name) else {
+                    return Any;
+                };
+                self.field_values(name, &decl.variants[i].fields, fields, e.pos);
+                Enum(decl.name.clone())
+            }
+        }
+    }
+
+    /// Checks the fields given in a record or variant value against its declaration.
+    fn field_values(
+        &mut self,
+        name: &str,
+        decl: &'a [(String, Type, Pos)],
+        given: &'a [(String, Expr, Pos)],
+        pos: Pos,
+    ) {
+        let mut seen = HashSet::new();
+        for (f, fe, fpos) in given {
+            if !seen.insert(f.as_str()) {
+                self.err("name", *fpos, format!("field `{}` is given twice", f));
+            }
+            match decl.iter().find(|d| d.0 == *f) {
+                Some((_, ft, _)) => {
+                    self.expect(fe, ft, &format!("field `{}` of `{}`", f, name));
+                }
+                None => {
+                    self.expr(fe, None);
+                    let names: Vec<&str> = decl.iter().map(|d| d.0.as_str()).collect();
+                    let hint = if names.is_empty() {
+                        format!("`{}` has no fields", name)
+                    } else {
+                        format!("its fields are: {}", names.join(", "))
+                    };
+                    self.errors.push(
+                        Error::new("type", *fpos, format!("`{}` has no field `{}`", name, f))
+                            .hint(hint),
+                    );
+                }
+            }
+        }
+        let missing: Vec<&str> = decl
+            .iter()
+            .map(|d| d.0.as_str())
+            .filter(|f| !seen.contains(f))
+            .collect();
+        if !missing.is_empty() {
+            self.errors.push(
+                Error::new(
+                    "type",
+                    pos,
+                    format!("`{}` is missing field(s): {}", name, missing.join(", ")),
+                )
+                .hint("every field must be given a value"),
+            );
+        }
+    }
+
+    fn match_stmt(&mut self, scrutinee: &'a Expr, arms: &'a [Arm], pos: Pos) {
+        let t = self.expr(scrutinee, None);
+        let decl = match &t {
+            Type::Enum(n) => self.prog.enums.iter().find(|e| &e.name == n),
+            Type::Any => None,
+            other => {
+                self.err(
+                    "type",
+                    scrutinee.pos,
+                    format!("`match` needs an enum value, found {}", other),
+                );
+                None
+            }
+        };
+        let mut covered = HashSet::new();
+        let mut wildcard = false;
+        for arm in arms {
+            let mut scope = HashMap::new();
+            match &arm.pattern {
+                Pattern::Wildcard(ppos) => {
+                    if wildcard {
+                        self.err("type", *ppos, "this `_` arm can never run".into());
+                    }
+                    wildcard = true;
+                }
+                Pattern::Variant(v, binds, ppos) => {
+                    if wildcard {
+                        self.errors.push(
+                            Error::new("type", *ppos, format!("the `{}` arm can never run", v))
+                                .hint("the `_` arm above it already matches everything"),
+                        );
+                    }
+                    let variant = decl.and_then(|d| d.variants.iter().find(|x| &x.name == v));
+                    match (decl, variant) {
+                        (Some(d), None) => {
+                            let names: Vec<&str> =
+                                d.variants.iter().map(|x| x.name.as_str()).collect();
+                            self.errors.push(
+                                Error::new(
+                                    "type",
+                                    *ppos,
+                                    format!("`{}` is not a variant of `{}`", v, d.name),
+                                )
+                                .hint(format!("its variants are: {}", names.join(", "))),
+                            );
+                        }
+                        (_, Some(var)) => {
+                            if !covered.insert(v.as_str()) {
+                                self.err(
+                                    "type",
+                                    *ppos,
+                                    format!("`{}` is already matched by an earlier arm", v),
+                                );
+                            }
+                            for (f, name, fpos) in binds {
+                                match var.field(f) {
+                                    Some((_, ft)) => {
+                                        if scope.insert(name.clone(), ft.clone()).is_some() {
+                                            self.err(
+                                                "name",
+                                                *fpos,
+                                                format!("`{}` is bound twice", name),
+                                            );
+                                        }
+                                    }
+                                    None => {
+                                        self.err(
+                                            "type",
+                                            *fpos,
+                                            format!("`{}` has no field `{}`", v, f),
+                                        );
+                                        // Bind anyway, so uses of it don't add more errors.
+                                        scope.insert(name.clone(), Type::Any);
+                                    }
+                                }
+                            }
+                        }
+                        (None, None) => {}
+                    }
+                }
+            }
+            self.scopes.push(scope);
+            self.block(&arm.body);
+            self.scopes.pop();
+        }
+        if let Some(d) = decl {
+            let missing: Vec<&str> = d
+                .variants
+                .iter()
+                .map(|v| v.name.as_str())
+                .filter(|v| !covered.contains(v))
+                .collect();
+            if !wildcard && !missing.is_empty() {
+                self.errors.push(
+                    Error::new(
+                        "type",
+                        pos,
+                        format!("`match` doesn't handle: {}", missing.join(", ")),
+                    )
+                    .hint("add an arm for each, or `_ => { ... }` for the rest"),
+                );
             }
         }
     }
@@ -492,6 +653,17 @@ impl<'a> Checker<'a> {
                 },
                 None => Type::Any,
             },
+            Type::Enum(n) => {
+                self.errors.push(
+                    Error::new(
+                        "type",
+                        pos,
+                        format!("can't read `.{}` directly from an enum `{}`", f, n),
+                    )
+                    .hint("use `match` to find out which variant it is and bind its fields"),
+                );
+                Type::Any
+            }
             _ => {
                 self.err(
                     "type",

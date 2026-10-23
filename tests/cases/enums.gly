@@ -1,0 +1,91 @@
+# Enums and match: variants with and without fields, exhaustive matching,
+# binding and renaming fields, wildcards, recursion, equality, contracts.
+
+type Point { x: Int, y: Int }
+
+enum Shape {
+  Circle { center: Point, radius: Int }
+  Rect { w: Int, h: Int }
+  Empty
+}
+
+enum Expr {
+  Num { value: Int }
+  Add { left: Expr, right: Expr }
+  Mul { left: Expr, right: Expr }
+}
+
+enum Parsed {
+  Ok { value: Int }
+  Failed { message: Str }
+}
+
+fn noisy(n: Int) -> Int uses io {
+  print("evaluating", n)
+  return n
+}
+
+fn area(s: Shape) -> Int {
+  match s {
+    Circle { radius } => { return 3 * radius * radius }
+    Rect { w: width, h: height } => { return width * height }
+    Empty => { return 0 }
+  }
+}
+
+fn eval(e: Expr) -> Int {
+  match e {
+    Num { value } => { return value }
+    Add { left, right } => { return eval(left) + eval(right) }
+    Mul { left, right } => { return eval(left) * eval(right) }
+  }
+}
+
+fn parse_digit(s: Str) -> Parsed {
+  if contains("0123456789", s) and len(s) == 1 {
+    return Ok { value: int(s) }
+  }
+  return Failed { message: "not a digit: " + s }
+}
+
+fn describe(s: Shape) -> Str
+  requires s != Empty
+{
+  let kind = "?"
+  match s {
+    Circle { center } => { kind = "circle at " + str(center.x) + "," + str(center.y) }
+    _ => { kind = "something else" }
+  }
+  return kind
+}
+
+fn main() uses io {
+  let shapes = [Circle { radius: noisy(2), center: Point { x: noisy(1), y: 1 } }, Rect { w: 3, h: 4 }, Empty]
+  let total = 0
+  for s in shapes {
+    print(s, "has area", area(s))
+    total = total + area(s)
+  }
+  print("total area:", total)
+
+  let s = Empty
+  if s == Empty {
+    print("empty is empty")
+  }
+  print(Rect { w: 1, h: 2 } == Rect { w: 1, h: 2 }, Rect { w: 1, h: 2 } != Rect { w: 2, h: 1 })
+  print(contains(shapes, Rect { w: 3, h: 4 }), str(Empty))
+
+  let e = Add { left: Num { value: 2 }, right: Mul { left: Num { value: 3 }, right: Num { value: 4 } } }
+  print(e)
+  print("2 + 3 * 4 =", eval(e))
+
+  for d in ["7", "x"] {
+    match parse_digit(d) {
+      Ok { value } => { print("parsed", value) }
+      Failed { message } => { print("error:", message) }
+    }
+  }
+
+  print(describe(shapes[0]), "/", describe(shapes[1]))
+  print(describe(Empty))
+}

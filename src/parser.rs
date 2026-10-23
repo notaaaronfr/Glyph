@@ -1,10 +1,11 @@
 use crate::ast::*;
 use crate::error::{Error, Pos};
 use crate::lexer::{lex, Tok, Token};
+use std::collections::HashSet;
 
-const KEYWORDS: [&str; 19] = [
+const KEYWORDS: [&str; 21] = [
     "fn", "let", "if", "else", "while", "for", "in", "return", "true", "false", "uses", "requires",
-    "ensures", "test", "assert", "and", "or", "not", "type",
+    "ensures", "test", "assert", "and", "or", "not", "type", "enum", "match",
 ];
 
 const BUILTIN_TYPES: [&str; 6] = ["Int", "Str", "Bool", "Unit", "Any", "List"];
@@ -13,22 +14,30 @@ pub fn parse(src: &str) -> Result<Program, Error> {
     let toks = lex(src)?;
     // Record types may be used before they are declared, and `Name {` is only a record
     // literal when `Name` is a declared type, so collect the type names up front.
-    let type_names = toks
-        .windows(2)
-        .filter(|w| w[0].tok == Tok::Ident("type".into()))
-        .filter_map(|w| match &w[1].tok {
-            Tok::Ident(n) => Some(n.clone()),
-            _ => None,
-        })
-        .collect();
+    let names_after = |kw: &str| -> HashSet<String> {
+        toks.windows(2)
+            .filter(|w| w[0].tok == Tok::Ident(kw.into()))
+            .filter_map(|w| match &w[1].tok {
+                Tok::Ident(n) => Some(n.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let type_names = names_after("type");
+    let enum_names = names_after("enum");
+    let (variant_names, variants_with_fields) = scan_variants(&toks);
     let mut p = Parser {
         toks,
         i: 0,
         src,
         type_names,
+        enum_names,
+        variant_names,
+        variants_with_fields,
     };
     let mut prog = Program {
         types: vec![],
+        enums: vec![],
         funcs: vec![],
         tests: vec![],
     };
@@ -37,13 +46,15 @@ pub fn parse(src: &str) -> Result<Program, Error> {
             break;
         } else if p.is_kw("type") {
             prog.types.push(p.type_decl()?);
+        } else if p.is_kw("enum") {
+            prog.enums.push(p.enum_decl()?);
         } else if p.is_kw("fn") {
             prog.funcs.push(p.func()?);
         } else if p.is_kw("test") {
             prog.tests.push(p.test()?);
         } else {
             return Err(p.err(format!(
-                "expected `type`, `fn` or `test` at top level, found {}",
+                "expected `type`, `enum`, `fn` or `test` at top level, found {}",
                 p.describe()
             )));
         }
@@ -51,11 +62,46 @@ pub fn parse(src: &str) -> Result<Program, Error> {
     Ok(prog)
 }
 
+/// Variant names are the identifiers directly inside an `enum { ... }` body (field
+/// names and types sit one level deeper). Also records which variants have fields:
+/// only those can be followed by `{`, so `if s == Empty {` still parses as an `if`.
+fn scan_variants(toks: &[Token]) -> (HashSet<String>, HashSet<String>) {
+    let (mut names, mut with_fields) = (HashSet::new(), HashSet::new());
+    let mut i = 0;
+    while i + 2 < toks.len() {
+        if toks[i].tok != Tok::Ident("enum".into()) || toks[i + 2].tok != Tok::Sym("{") {
+            i += 1;
+            continue;
+        }
+        i += 3;
+        let mut depth = 1;
+        while i < toks.len() && depth > 0 {
+            match &toks[i].tok {
+                Tok::Sym("{") => depth += 1,
+                Tok::Sym("}") => depth -= 1,
+                Tok::Ident(n) if depth == 1 => {
+                    names.insert(n.clone());
+                    if toks.get(i + 1).is_some_and(|t| t.tok == Tok::Sym("{")) {
+                        with_fields.insert(n.clone());
+                    }
+                }
+                Tok::Eof => break,
+                _ => {}
+            }
+            i += 1;
+        }
+    }
+    (names, with_fields)
+}
+
 struct Parser<'a> {
     toks: Vec<Token>,
     i: usize,
     src: &'a str,
-    type_names: std::collections::HashSet<String>,
+    type_names: HashSet<String>,
+    enum_names: HashSet<String>,
+    variant_names: HashSet<String>,
+    variants_with_fields: HashSet<String>,
 }
 
 fn bx(e: Expr) -> Box<Expr> {
@@ -198,9 +244,8 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn type_decl(&mut self) -> Result<TypeDecl, Error> {
-        let pos = self.pos();
-        self.bump();
+    /// A capitalised name for a new type, variant or enum.
+    fn type_name(&mut self, what: &str) -> Result<(String, Pos), Error> {
         let (name, npos) = self.ident()?;
         if BUILTIN_TYPES.contains(&name.as_str()) {
             return Err(Error::new(
@@ -213,14 +258,19 @@ impl<'a> Parser<'a> {
             return Err(Error::new(
                 "syntax",
                 npos,
-                format!("type names start with a capital letter: `{}`", name),
+                format!("{} names start with a capital letter: `{}`", what, name),
             )
             .hint(format!(
-                "write `type {}{} {{ ... }}`",
+                "write `{}{}`",
                 name[..1].to_uppercase(),
                 &name[1..]
             )));
         }
+        Ok((name, npos))
+    }
+
+    /// `{ name: Type, ... }`, with commas or newlines between fields.
+    fn field_decls(&mut self) -> Result<Vec<(String, Type, Pos)>, Error> {
         self.expect_sym("{")?;
         let mut fields = vec![];
         while !self.is_sym("}") {
@@ -235,7 +285,86 @@ impl<'a> Parser<'a> {
             self.eat_sym(",");
         }
         self.bump();
+        Ok(fields)
+    }
+
+    fn type_decl(&mut self) -> Result<TypeDecl, Error> {
+        let pos = self.pos();
+        self.bump();
+        let (name, _) = self.type_name("type")?;
+        let fields = self.field_decls()?;
         Ok(TypeDecl { name, fields, pos })
+    }
+
+    fn enum_decl(&mut self) -> Result<EnumDecl, Error> {
+        let pos = self.pos();
+        self.bump();
+        let (name, _) = self.type_name("enum")?;
+        self.expect_sym("{")?;
+        let mut variants = vec![];
+        while !self.is_sym("}") {
+            let (vname, vpos) = self.type_name("variant")?;
+            let fields = if self.is_sym("{") {
+                self.field_decls()?
+            } else {
+                vec![]
+            };
+            variants.push(VariantDecl {
+                name: vname,
+                fields,
+                pos: vpos,
+            });
+            self.eat_sym(",");
+        }
+        self.bump();
+        if variants.is_empty() {
+            return Err(Error::new(
+                "syntax",
+                pos,
+                format!("enum `{}` needs at least one variant", name),
+            ));
+        }
+        Ok(EnumDecl {
+            name,
+            variants,
+            pos,
+        })
+    }
+
+    /// `{ field: expr, ... }` for record and variant values.
+    fn field_values(&mut self) -> Result<Vec<(String, Expr, Pos)>, Error> {
+        self.expect_sym("{")?;
+        let mut fields = vec![];
+        while !self.is_sym("}") {
+            let (f, fpos) = self.ident()?;
+            self.expect_sym(":")?;
+            fields.push((f, self.expr()?, fpos));
+            self.eat_sym(",");
+        }
+        self.bump();
+        Ok(fields)
+    }
+
+    fn pattern(&mut self) -> Result<Pattern, Error> {
+        let (n, pos) = self.ident()?;
+        if n == "_" {
+            return Ok(Pattern::Wildcard(pos));
+        }
+        let mut binds = vec![];
+        if self.eat_sym("{") {
+            while !self.is_sym("}") {
+                let (f, fpos) = self.ident()?;
+                let var = if self.eat_sym(":") {
+                    self.ident()?.0
+                } else {
+                    f.clone()
+                };
+                binds.push((f, var, fpos));
+                self.eat_sym(",");
+            }
+            self.bump();
+        }
+        Ok(Pattern::Variant(n, binds, pos))
     }
 
     fn test(&mut self) -> Result<Test, Error> {
@@ -294,6 +423,7 @@ impl<'a> Parser<'a> {
                 }
             }
             _ if self.type_names.contains(&n) => Type::Record(n),
+            _ if self.enum_names.contains(&n) => Type::Enum(n),
             _ => {
                 return Err(
                     Error::new("syntax", pos, format!("unknown type `{}`", n)).hint(
@@ -354,6 +484,22 @@ impl<'a> Parser<'a> {
         }
         if self.eat_kw("assert") {
             return Ok(Stmt::Assert(self.expr()?));
+        }
+        if self.eat_kw("match") {
+            let e = self.expr()?;
+            self.expect_sym("{")?;
+            let mut arms = vec![];
+            while !self.is_sym("}") {
+                if matches!(self.peek(), Tok::Eof) {
+                    return Err(self.err("unexpected end of file: missing `}`"));
+                }
+                let pattern = self.pattern()?;
+                self.expect_sym("=>")?;
+                let body = self.block()?;
+                arms.push(Arm { pattern, body });
+            }
+            self.bump();
+            return Ok(Stmt::Match(e, arms, pos));
         }
         let e = self.expr()?;
         if self.is_sym("=") {
@@ -538,16 +684,13 @@ impl<'a> Parser<'a> {
                     self.expect_sym(")")?;
                     Ok(self.mk(ExprKind::Call(x, args), s))
                 } else if self.type_names.contains(&x) && self.is_sym("{") {
-                    self.bump();
-                    let mut fields = vec![];
-                    while !self.is_sym("}") {
-                        let (f, fpos) = self.ident()?;
-                        self.expect_sym(":")?;
-                        fields.push((f, self.expr()?, fpos));
-                        self.eat_sym(",");
-                    }
-                    self.bump();
+                    let fields = self.field_values()?;
                     Ok(self.mk(ExprKind::Record(x, fields), s))
+                } else if self.variants_with_fields.contains(&x) && self.is_sym("{") {
+                    let fields = self.field_values()?;
+                    Ok(self.mk(ExprKind::Variant(x, fields), s))
+                } else if self.variant_names.contains(&x) {
+                    Ok(self.mk(ExprKind::Variant(x, vec![]), s))
                 } else {
                     Ok(self.mk(ExprKind::Var(x), s))
                 }

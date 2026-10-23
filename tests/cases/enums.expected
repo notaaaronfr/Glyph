@@ -1,0 +1,21 @@
+exit: 1
+--- stdout ---
+evaluating 2
+evaluating 1
+Circle { center: Point { x: 1, y: 1 }, radius: 2 } has area 12
+Rect { w: 3, h: 4 } has area 12
+Empty has area 0
+total area: 24
+empty is empty
+true true
+true Empty
+Add { left: Num { value: 2 }, right: Mul { left: Num { value: 3 }, right: Num { value: 4 } } }
+2 + 3 * 4 = 14
+parsed 7
+error: not a digit: x
+circle at 1,1 / something else
+--- stderr ---
+tests/cases/enums.gly:90:9: contract error: precondition of `describe` violated: `s != Empty`
+90 |   print(describe(Empty))
+   |         ^
+  hint: called with s = Empty

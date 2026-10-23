@@ -11,6 +11,8 @@ pub enum Type {
     List(Box<Type>),
     /// A user-defined record type, by name.
     Record(String),
+    /// A user-defined enum type, by name.
+    Enum(String),
 }
 
 impl fmt::Display for Type {
@@ -22,7 +24,7 @@ impl fmt::Display for Type {
             Type::Unit => write!(f, "Unit"),
             Type::Any => write!(f, "Any"),
             Type::List(t) => write!(f, "List[{}]", t),
-            Type::Record(n) => write!(f, "{}", n),
+            Type::Record(n) | Type::Enum(n) => write!(f, "{}", n),
         }
     }
 }
@@ -94,6 +96,22 @@ pub enum ExprKind {
     Record(String, Vec<(String, Expr, Pos)>),
     /// `p.x`
     Field(Box<Expr>, String),
+    /// An enum value: `Circle { radius: 2 }` or a variant without fields like `Empty`.
+    Variant(String, Vec<(String, Expr, Pos)>),
+}
+
+#[derive(Debug, Clone)]
+pub enum Pattern {
+    /// `_`
+    Wildcard(Pos),
+    /// `Circle { radius }` or `Circle { radius: r }`: (field, variable to bind, position).
+    Variant(String, Vec<(String, String, Pos)>, Pos),
+}
+
+#[derive(Debug, Clone)]
+pub struct Arm {
+    pub pattern: Pattern,
+    pub body: Vec<Stmt>,
 }
 
 #[derive(Debug, Clone)]
@@ -108,6 +126,7 @@ pub enum Stmt {
     For(String, Expr, Vec<Stmt>, Pos),
     Return(Option<Expr>, Pos),
     Assert(Expr),
+    Match(Expr, Vec<Arm>, Pos),
 }
 
 #[derive(Debug, Clone)]
@@ -154,8 +173,44 @@ impl TypeDecl {
 }
 
 #[derive(Debug, Clone)]
+pub struct VariantDecl {
+    pub name: String,
+    pub fields: Vec<(String, Type, Pos)>,
+    pub pos: Pos,
+}
+
+impl VariantDecl {
+    pub fn field(&self, name: &str) -> Option<(usize, &Type)> {
+        self.fields
+            .iter()
+            .position(|f| f.0 == name)
+            .map(|i| (i, &self.fields[i].1))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EnumDecl {
+    pub name: String,
+    pub variants: Vec<VariantDecl>,
+    pub pos: Pos,
+}
+
+impl Program {
+    /// The enum a variant belongs to, and the variant's index (its tag).
+    pub fn variant(&self, name: &str) -> Option<(&EnumDecl, usize)> {
+        self.enums.iter().find_map(|e| {
+            e.variants
+                .iter()
+                .position(|v| v.name == name)
+                .map(|i| (e, i))
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Program {
     pub types: Vec<TypeDecl>,
+    pub enums: Vec<EnumDecl>,
     pub funcs: Vec<Func>,
     pub tests: Vec<Test>,
 }

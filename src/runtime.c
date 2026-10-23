@@ -36,14 +36,26 @@ typedef struct { tn_buf *buf; int64_t len; } tn_list;
 /* Records are immutable arrays of fields in declaration order: `p.x = v` copies. */
 typedef struct { int64_t n; tn_val f[]; } tn_rec;
 
-enum { TN_INT, TN_STR, TN_BOOL, TN_UNIT, TN_LIST, TN_RECORD };
-typedef struct tn_type {
-    int kind;
-    const struct tn_type *elem;               /* lists */
-    const char *name;                         /* records */
+/* Enum values: which variant (`tag`, its index in the declaration) and its fields. */
+typedef struct { int64_t tag; tn_val f[]; } tn_enum;
+
+struct tn_type;
+typedef struct {
+    const char *name;
     int64_t nfields;
     const char *const *fnames;
     const struct tn_type *const *ftypes;
+} tn_variant;
+
+enum { TN_INT, TN_STR, TN_BOOL, TN_UNIT, TN_LIST, TN_RECORD, TN_ENUM };
+typedef struct tn_type {
+    int kind;
+    const struct tn_type *elem;               /* lists */
+    const char *name;                         /* records and enums */
+    int64_t nfields;                          /* records: fields; enums: variants */
+    const char *const *fnames;
+    const struct tn_type *const *ftypes;
+    const tn_variant *variants;               /* enums */
 } tn_type;
 static const tn_type TY_i = {TN_INT, 0}, TY_s = {TN_STR, 0}, TY_b = {TN_BOOL, 0}, TY_u = {TN_UNIT, 0};
 
@@ -306,6 +318,13 @@ static tn_rec *tn_rec_set(tn_rec *r, int64_t i, tn_val v) {
     return c;
 }
 
+static tn_enum *tn_enum_new(int64_t tag, int64_t n, const tn_val *fields) {
+    tn_enum *e = tn_alloc(sizeof(tn_enum) + sizeof(tn_val) * n);
+    e->tag = tag;
+    if (n) memcpy(e->f, fields, sizeof(tn_val) * n);
+    return e;
+}
+
 /* ---- generic operations, driven by type descriptors ---- */
 
 typedef struct { char *p; int64_t len, cap; } tn_sb;
@@ -318,6 +337,21 @@ static void tn_sb_put(tn_sb *b, const char *s, int64_t n) {
     }
     memcpy(b->p + b->len, s, n);
     b->len += n;
+}
+
+static void tn_show(tn_sb *b, tn_val v, const tn_type *t, bool quote);
+
+/* " { a: 1, b: \"x\" }" */
+static void tn_show_fields(tn_sb *b, const tn_val *f, int64_t n, const char *const *names,
+                           const struct tn_type *const *types) {
+    tn_sb_put(b, " { ", 3);
+    for (int64_t i = 0; i < n; i++) {
+        if (i) tn_sb_put(b, ", ", 2);
+        tn_sb_put(b, names[i], strlen(names[i]));
+        tn_sb_put(b, ": ", 2);
+        tn_show(b, f[i], types[i], true);
+    }
+    tn_sb_put(b, " }", 2);
 }
 
 static void tn_show(tn_sb *b, tn_val v, const tn_type *t, bool quote) {
@@ -376,14 +410,14 @@ static void tn_show(tn_sb *b, tn_val v, const tn_type *t, bool quote) {
             tn_sb_put(b, " {}", 3);
             break;
         }
-        tn_sb_put(b, " { ", 3);
-        for (int64_t i = 0; i < t->nfields; i++) {
-            if (i) tn_sb_put(b, ", ", 2);
-            tn_sb_put(b, t->fnames[i], strlen(t->fnames[i]));
-            tn_sb_put(b, ": ", 2);
-            tn_show(b, r->f[i], t->ftypes[i], true);
-        }
-        tn_sb_put(b, " }", 2);
+        tn_show_fields(b, r->f, t->nfields, t->fnames, t->ftypes);
+        break;
+    }
+    case TN_ENUM: {
+        tn_enum *e = v.p;
+        const tn_variant *var = &t->variants[e->tag];
+        tn_sb_put(b, var->name, strlen(var->name));
+        if (var->nfields) tn_show_fields(b, e->f, var->nfields, var->fnames, var->ftypes);
         break;
     }
     }
@@ -408,6 +442,14 @@ static bool tn_eq(tn_val a, tn_val b, const tn_type *t) {
         tn_rec *x = a.p, *y = b.p;
         for (int64_t i = 0; i < t->nfields; i++)
             if (!tn_eq(x->f[i], y->f[i], t->ftypes[i])) return false;
+        return true;
+    }
+    case TN_ENUM: {
+        tn_enum *x = a.p, *y = b.p;
+        if (x->tag != y->tag) return false;
+        const tn_variant *var = &t->variants[x->tag];
+        for (int64_t i = 0; i < var->nfields; i++)
+            if (!tn_eq(x->f[i], y->f[i], var->ftypes[i])) return false;
         return true;
     }
     default: {
