@@ -1,0 +1,15 @@
+# In-place updates: with a single owner, these loops must not allocate per iteration.
+type Counter { hits: Int, log: List[Int], name: Str }
+
+fn main() uses io {
+  let c = Counter { hits: 0, log: [], name: "c" }
+  for i in range(100000) {
+    c.hits = c.hits + 1
+    c.log = push(c.log, i)
+  }
+  let xs: List[Int] = []
+  for i in range(100000) {
+    xs = push(xs, i)
+  }
+  print(c.hits, len(c.log), len(xs), c.log[99999], xs[99999])
+}

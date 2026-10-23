@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
 
 const USAGE: &str = "\
-Glyph 0.6 - a language AI can write and humans can trust
+Glyph 0.7 - a language AI can write and humans can trust
 
 usage: glyph <command> <file.gly> [options]
 
@@ -329,8 +329,12 @@ fn compile_c(c: &str, out: &Path) -> Result<(), String> {
     let c_file = std::env::temp_dir().join(format!("glyph-{}.c", std::process::id()));
     std::fs::write(&c_file, c).map_err(|e| format!("cannot write {}: {}", c_file.display(), e))?;
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
+    // Extra flags, e.g. GLYPH_CFLAGS="-fsanitize=address -g" to check memory safety.
+    let extra = std::env::var("GLYPH_CFLAGS").unwrap_or_default();
     let result = Command::new(&cc)
-        .args(["-O2", "-w", "-o"])
+        .args(["-O2", "-w"])
+        .args(extra.split_whitespace())
+        .arg("-o")
         .arg(out)
         .arg(&c_file)
         .output();

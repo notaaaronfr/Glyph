@@ -148,3 +148,82 @@ fn fix_does_nothing_for_a_healthy_file() {
     assert!(out.starts_with("exit: 0"), "{}", out);
     assert!(out.contains("nothing to fix"), "{}", out);
 }
+
+/// Runs `glyph` with extra environment variables.
+fn glyph_env(args: &[&str], env: &[(&str, &str)]) -> String {
+    let out = Command::new(env!("CARGO_BIN_EXE_glyph"))
+        .args(args)
+        .envs(env.iter().copied())
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .expect("failed to run glyph");
+    format!(
+        "exit: {}\n--- stdout ---\n{}--- stderr ---\n{}",
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+/// Native builds instrumented with AddressSanitizer (any use-after-free or double
+/// free aborts the program) and Glyph's own allocation counters.
+const CHECKED: [(&str, &str); 3] = [
+    (
+        "GLYPH_CFLAGS",
+        "-fsanitize=address -fno-omit-frame-pointer -g",
+    ),
+    ("GLYPH_MEMSTATS", "1"),
+    ("ASAN_OPTIONS", "detect_leaks=0"),
+];
+
+fn gly_files(dir: &str) -> Vec<String> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files: Vec<String> = std::fs::read_dir(root.join(dir))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "gly"))
+        .map(|p| p.strip_prefix(root).unwrap().to_str().unwrap().to_string())
+        .collect();
+    files.sort();
+    files
+}
+
+#[test]
+fn native_memory_is_safe_and_leak_free() {
+    let mut files = gly_files("tests/memory");
+    files.push("examples/memory_bench.gly".into());
+    for f in &files {
+        let out = glyph_env(&["run", f, "--native"], &CHECKED);
+        assert!(out.starts_with("exit: 0"), "{}:\n{}", f, out);
+        assert!(!out.contains("AddressSanitizer"), "{}:\n{}", f, out);
+        assert!(out.contains(", 0 live at exit"), "{} leaked:\n{}", f, out);
+        // The memory checks must not change behaviour.
+        let interp = glyph(&["run", f]);
+        let stdout = |s: &str| s.split("--- stderr ---").next().unwrap().to_string();
+        assert_eq!(stdout(&interp), stdout(&out), "{}: output differs", f);
+    }
+}
+
+#[test]
+fn native_error_paths_are_memory_safe() {
+    for f in gly_files("tests/cases") {
+        let out = glyph_env(&["run", &f, "--native"], &CHECKED);
+        assert!(!out.contains("AddressSanitizer"), "{}:\n{}", f, out);
+    }
+}
+
+#[test]
+fn updates_with_one_owner_happen_in_place() {
+    let out = glyph_env(
+        &["run", "tests/memory/reuse.gly", "--native"],
+        &[("GLYPH_MEMSTATS", "1")],
+    );
+    let allocated: i64 = out
+        .split("glyph memstats: ")
+        .nth(1)
+        .and_then(|s| s.split(' ').next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("no memstats:\n{}", out));
+    // 300,000 updates; without in-place reuse this would be hundreds of thousands.
+    assert!(allocated < 50, "{} allocations:\n{}", allocated, out);
+}

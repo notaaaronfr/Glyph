@@ -32,6 +32,7 @@ test "withdraw subtracts" {
 - **Contracts with blame.** `requires` and `ensures` are checked on every call. A failed precondition is blamed on the caller; a failed postcondition is blamed on the function.
 - **Built-in tests.** `test "name" { assert ... }` blocks live next to the code.
 - **Native compiler.** `glyph build` produces a standalone executable that behaves identically to the interpreter, down to the error messages.
+- **Memory without a garbage collector.** Native code frees every value the moment it's no longer used, and updates values in place when nothing else shares them. [More below](#memory-management).
 - **Errors for agents.** With `--json`, every diagnostic is a JSON object with the exact values involved, so an AI can fix its own mistakes in a loop.
 - **AI fixes, verified.** `glyph fix` asks Claude to repair errors and failing tests, and accepts a fix only if Glyph can verify it. [More below](#glyph-fix-ai-proposes-glyph-proves).
 
@@ -113,8 +114,9 @@ What the guard says when a proposal cheats:
 
 | Program | Interpreter | Native |
 |---|---|---|
-| `fib(32)` | 4.1 s | 0.02 s |
+| `fib(32)` | 4.1 s | 0.01 s |
 | [`examples/bench.gly`](examples/bench.gly) | 3.1 s | 0.03 s |
+| [`examples/memory_bench.gly`](examples/memory_bench.gly) | 3.9 s | 0.06 s |
 
 Python 3 runs `fib(32)` in 0.56 s.
 
@@ -123,7 +125,34 @@ source.gly → lexer → parser → checker (names, types, effects) ─┬→ in
                                                                └→ codegen → C → cc -O2 → executable
 ```
 
-## Language reference (v0.6)
+## Memory management
+
+Natively compiled Glyph uses **precise reference counting with in-place reuse**, in the style of [Perceus](https://www.microsoft.com/en-us/research/publication/perceus-garbage-free-reference-counting-with-reuse/) (Koka, Lean 4):
+
+- **No garbage collector, no pauses.** Every value is freed at the exact moment its last owner is done with it.
+- **No leaks from cycles, by construction.** Glyph values are immutable and built bottom-up, so reference cycles can't exist, and reference counting alone reclaims everything. No cycle collector is needed.
+- **In-place updates.** When a value has exactly one owner, `xs = push(xs, v)`, `p.x = v`, `line.to.y = v` and `c.log = push(c.log, v)` reuse its memory instead of copying. Your code keeps value semantics; the machine gets mutation's speed.
+- **Moves instead of copies.** The compiler moves values on their last use in `x = f(x)` and `return x`, so the in-place updates above also work through function calls.
+- **Deep structures are safe to free.** Freeing uses an explicit work list, not recursion, so dropping a structure a million levels deep can't overflow the stack.
+
+On [`examples/memory_bench.gly`](examples/memory_bench.gly), which builds 1.4 million short-lived values:
+
+| | Before (v0.6, never freed) | v0.7 |
+|---|---|---|
+| Peak memory | 349 MB | **29 MB** |
+| Time | 0.12 s | **0.06 s** |
+| Objects still allocated at exit | all of them | **0** |
+
+[`tests/memory/reuse.gly`](tests/memory/reuse.gly) runs 300,000 updates using just **14 allocations**.
+
+Every test program is also compiled with AddressSanitizer in CI, which aborts on any use-after-free or double free, and checked for zero leaks. To see the numbers for your own program:
+
+```sh
+GLYPH_MEMSTATS=1 glyph run app.gly --native
+# glyph memstats: 1415650 allocated, 1415650 freed, 0 live at exit, peak 40023 live
+```
+
+## Language reference (v0.7)
 
 | Feature | Syntax |
 |---|---|
@@ -206,14 +235,15 @@ print(first(["a", "b"]))           # Some { value: "a" }
 
 ## Status and roadmap
 
-Glyph is **early and experimental**: expect breaking changes. Natively compiled programs don't free memory yet; that's the next milestone.
+Glyph is **early and experimental**: expect breaking changes.
 
 - [x] Interpreter, static types, effects, contracts, tests, JSON diagnostics
 - [x] Native compiler with identical behaviour
 - [x] Records
 - [x] Enums and exhaustive `match`
 - [x] Generics, with built-in `Option[T]` and `Result[T, E]`
-- [ ] Memory management for native code: Perceus-style reference counting with in-place reuse
+- [x] Memory management for native code: precise reference counting with in-place reuse
+- [ ] Reuse of matched enum values (Perceus "reuse analysis"), borrowed parameters
 - [ ] Modules
 - [x] `glyph fix`: AI repair loop. Fixes are accepted only if they type-check, add no effects, keep every contract and test, and pass
 - [ ] `uses ai`: model calls as a typed, declared effect

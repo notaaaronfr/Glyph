@@ -20,6 +20,10 @@ pub fn emit_c(p: &Program, types: &Types, file: &str, src: &str) -> Result<Strin
         records: p.types.iter().map(|t| (t.name.as_str(), t)).collect(),
         rec_started: Default::default(),
         var_types: HashMap::new(),
+        drops: vec![],
+        temps: vec![],
+        movable: None,
+        movable_field: None,
         out: String::new(),
         ind: 0,
         n: 0,
@@ -95,7 +99,7 @@ pub fn emit_c(p: &Program, types: &Types, file: &str, src: &str) -> Result<Strin
     c += "static void tn_init_lits(void) {\n";
     for (i, s) in g.lits.iter().enumerate() {
         c += &format!(
-            "    tn_lits[{}] = tn_str_from({}, {});\n",
+            "    tn_lits[{}] = tn_str_static({}, {});\n",
             i,
             c_str(s),
             s.len()
@@ -106,7 +110,7 @@ pub fn emit_c(p: &Program, types: &Types, file: &str, src: &str) -> Result<Strin
     c += "\n";
     c += &g.out;
     c += &format!(
-        "int main(void) {{\n    tn_init();\n    tn_init_lits();\n    g_main({});\n    return 0;\n}}\n",
+        "int main(void) {{\n    tn_init();\n    tn_init_lits();\n    g_main({});\n    tn_memstats();\n    return 0;\n}}\n",
         loc(main.pos)
     );
     Ok(c)
@@ -218,6 +222,31 @@ fn from_val(t: &Type, v: &str) -> String {
     }
 }
 
+/// A lowered expression: a C expression that is cheap to repeat (a variable or a
+/// literal). `owned` is true for a temporary holding a reference that must be
+/// released (or moved); variables and literals are borrowed.
+struct Atom {
+    c: String,
+    owned: bool,
+}
+
+/// Values that live on the heap and are reference counted.
+fn is_heap(t: &Type) -> bool {
+    matches!(
+        t,
+        Type::Str | Type::List(_) | Type::Record(..) | Type::Enum(..)
+    )
+}
+
+fn heap_ctype(t: &Type) -> &'static str {
+    match t {
+        Type::Str => "tn_str *",
+        Type::List(_) => "tn_list *",
+        Type::Record(..) => "tn_rec *",
+        _ => "tn_enum *",
+    }
+}
+
 fn elem_of(t: &Type) -> Type {
     match t {
         Type::List(x) => (**x).clone(),
@@ -235,6 +264,14 @@ struct Gen<'a> {
     scopes: Vec<HashMap<String, String>>,
     /// C variable name -> Glyph type. C names are unique within a function.
     var_types: HashMap<String, Type>,
+    /// Per scope: heap variables to drop when the scope ends.
+    drops: Vec<Vec<String>>,
+    /// Per statement (and `and`/`or` right side): owned temporaries to drop.
+    temps: Vec<Vec<(String, Type)>>,
+    /// The variable whose single read in the current assignment takes its value.
+    movable: Option<String>,
+    /// Likewise for `p.f = ...p.f...`: (C variable, field) whose read moves the field out.
+    movable_field: Option<(String, String)>,
     records: HashMap<&'a str, &'a TypeDecl>,
     prog: &'a Program,
     rec_started: std::collections::HashSet<String>,
@@ -300,7 +337,10 @@ impl<'a> Gen<'a> {
             _ => format!("TY_{}", mangle(t)),
         };
         // Mark before recursing: a type may contain itself through a list or enum.
+        // List[Int] and List[Str] are defined by the runtime.
         if !matches!(t, Type::List(_) | Type::Record(..) | Type::Enum(..))
+            || name == "TY_li"
+            || name == "TY_ls"
             || !self.rec_started.insert(name.clone())
         {
             return format!("&{}", name);
@@ -428,11 +468,86 @@ impl<'a> Gen<'a> {
             .expect("checker guarantees variables exist")
     }
 
-    fn tmp(&mut self, t: &Type, pos: Pos, init: String) -> Result<String, Error> {
+    /// A new temporary holding `init`. Heap temporaries own their value and are
+    /// dropped at the end of the statement unless something takes ownership first.
+    fn tmp(&mut self, t: &Type, pos: Pos, init: String) -> Result<Atom, Error> {
         let ct = self.ctype(t, pos)?;
         let name = self.fresh("t");
         self.line(format!("{} {} = {};", ct, name, init));
-        Ok(name)
+        let owned = is_heap(t);
+        if owned {
+            self.temps
+                .last_mut()
+                .expect("temporaries live in a statement")
+                .push((name.clone(), t.clone()));
+        }
+        Ok(Atom { c: name, owned })
+    }
+
+    /// A C expression for a new reference to `a`'s value: moves an owned
+    /// temporary (no count change), or dups a borrowed value.
+    fn own(&mut self, a: &Atom, t: &Type) -> String {
+        if !is_heap(t) {
+            return a.c.clone();
+        }
+        if a.owned && self.take_temp(&a.c) {
+            return a.c.clone();
+        }
+        format!("({})tn_dup({})", heap_ctype(t), a.c)
+    }
+
+    /// A C expression for an owned copy of the borrowed value `v` of type `t`.
+    fn dup_of(t: &Type, v: String) -> String {
+        if is_heap(t) {
+            format!("({})tn_dup({})", heap_ctype(t), v)
+        } else {
+            v
+        }
+    }
+
+    /// Takes temporary `c` out of the drop lists (its ownership moves elsewhere).
+    fn take_temp(&mut self, c: &str) -> bool {
+        for frame in self.temps.iter_mut().rev() {
+            if let Some(i) = frame.iter().position(|(n, _)| n == c) {
+                frame.remove(i);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Drops the current statement's remaining temporaries.
+    fn drop_temps(&mut self) {
+        let frame = std::mem::take(self.temps.last_mut().expect("in a statement"));
+        for (c, _) in frame.iter().rev() {
+            self.line(format!("tn_drop({});", c));
+        }
+    }
+
+    fn push_scope(&mut self) {
+        self.scopes.push(HashMap::new());
+        self.drops.push(vec![]);
+    }
+
+    /// Ends a scope, dropping the heap variables declared in it.
+    fn pop_scope(&mut self) {
+        self.scopes.pop();
+        let vars = self.drops.pop().unwrap_or_default();
+        for c in vars.iter().rev() {
+            self.line(format!("tn_drop({});", c));
+        }
+    }
+
+    /// Declares a variable that owns its value until its scope ends.
+    fn declare_var(&mut self, name: &str, c: String, t: Type) {
+        if is_heap(&t) {
+            self.drops.last_mut().expect("in a scope").push(c.clone());
+        }
+        self.var_types.insert(c.clone(), t);
+        self.scopes
+            .last_mut()
+            .expect("in a scope")
+            .insert(name.to_string(), c);
     }
 
     fn signature(
@@ -498,6 +613,7 @@ impl<'a> Gen<'a> {
 
     /// Each Glyph function becomes two C functions: `gb_f` holds the body, and `g_f`
     /// wraps it with the recursion limit and the `requires` / `ensures` checks.
+    /// Both take ownership of their arguments and return an owned result.
     fn func(&mut self, f: &'a Func, targs: &[Type], cname: &str) -> Result<(), Error> {
         self.inst = bindings(&f.tparams, targs);
         let (ret, params) = self.signature(f, &self.inst.clone())?;
@@ -507,11 +623,6 @@ impl<'a> Gen<'a> {
             .iter()
             .map(|p| (p.name.clone(), p.ty.subst(&self.inst)))
             .collect();
-        let param_scope: HashMap<String, String> = f
-            .params
-            .iter()
-            .map(|p| (p.name.clone(), format!("p_{}", p.name)))
-            .collect();
 
         self.line(format!(
             "static {} gb_{}({}) {{",
@@ -520,15 +631,20 @@ impl<'a> Gen<'a> {
             plist(&params)
         ));
         self.ind = 1;
+        self.scopes = vec![];
+        self.drops = vec![];
+        self.temps = vec![];
+        self.push_scope();
         for (name, ty) in &fparams {
-            self.var_types.insert(format!("p_{}", name), ty.clone());
+            self.declare_var(name, format!("p_{}", name), ty.clone());
         }
-        self.var_types.insert("result_".into(), fret.clone());
-        self.scopes = vec![param_scope.clone()];
         self.block(&f.body)?;
         if fret == Type::Unit {
+            self.pop_scope();
             self.line("return 0;");
         } else {
+            self.scopes.pop();
+            self.drops.pop();
             self.line("abort(); /* unreachable: the checker guarantees a return */");
         }
         self.ind = 0;
@@ -565,19 +681,44 @@ impl<'a> Gen<'a> {
                 vals.join(", ")
             )
         };
+        // Contracts borrow the arguments; the wrapper still owns them.
+        let param_scope: HashMap<String, String> = fparams
+            .iter()
+            .map(|(n, _)| (n.clone(), format!("p_{}", n)))
+            .collect();
+        for (n, ty) in &fparams {
+            self.var_types.insert(format!("p_{}", n), ty.clone());
+        }
         // A failed precondition is the caller's fault: report it at the call site.
         self.scopes = vec![param_scope.clone()];
+        self.drops = vec![vec![]];
         for c in &f.requires {
+            self.temps.push(vec![]);
             let a = self.expr(c)?;
+            self.drop_temps();
+            self.temps.pop();
             let msg = format!("precondition of `{}` violated: `{}`", f.name, c.text);
             self.line(format!(
                 "if (!{}) tn_fail(\"contract\", at, {}, tn_fmt(\"called with %s\", {}));",
-                a,
+                a.c,
                 c_str(&msg),
                 inputs
             ));
         }
-        let args: Vec<String> = f.params.iter().map(|p| format!("p_{}", p.name)).collect();
+        // The body consumes its arguments. If `ensures` needs them afterwards, it gets
+        // its own references.
+        let keep = !f.ensures.is_empty();
+        let args: Vec<String> = fparams
+            .iter()
+            .map(|(n, ty)| {
+                let p = format!("p_{}", n);
+                if keep {
+                    Self::dup_of(ty, p)
+                } else {
+                    p
+                }
+            })
+            .collect();
         self.line(format!(
             "{} result_ = gb_{}({});",
             ret,
@@ -587,20 +728,31 @@ impl<'a> Gen<'a> {
         // A failed postcondition is the function's own fault: report it at the clause.
         let mut post_scope = param_scope;
         post_scope.insert("result".into(), "result_".into());
+        self.var_types.insert("result_".into(), fret.clone());
         self.scopes = vec![post_scope];
         let ret_desc = self.tydesc(&fret);
         for c in &f.ensures {
+            self.temps.push(vec![]);
             let a = self.expr(c)?;
+            self.drop_temps();
+            self.temps.pop();
             let msg = format!("postcondition of `{}` violated: `{}`", f.name, c.text);
             self.line(format!(
                 "if (!{}) tn_fail(\"contract\", {}, {}, tn_fmt(\"called with %s, returned %s\", {}, tn_to_str({}, {}, true)->data));",
-                a,
+                a.c,
                 loc(c.pos),
                 c_str(&msg),
                 inputs,
                 to_val(&fret, "result_"),
                 ret_desc
             ));
+        }
+        if keep {
+            for (n, ty) in &fparams {
+                if is_heap(ty) {
+                    self.line(format!("tn_drop(p_{});", n));
+                }
+            }
         }
         self.line("tn_depth--;");
         self.line("return result_;");
@@ -610,11 +762,11 @@ impl<'a> Gen<'a> {
     }
 
     fn block(&mut self, stmts: &[Stmt]) -> Result<(), Error> {
-        self.scopes.push(HashMap::new());
+        self.push_scope();
         for s in stmts {
             self.stmt(s)?;
         }
-        self.scopes.pop();
+        self.pop_scope();
         Ok(())
     }
 
@@ -625,7 +777,55 @@ impl<'a> Gen<'a> {
         Ok(())
     }
 
+    /// Each statement gets a frame of temporaries, dropped when it ends.
     fn stmt(&mut self, s: &Stmt) -> Result<(), Error> {
+        self.temps.push(vec![]);
+        self.stmt_inner(s)?;
+        self.drop_temps();
+        self.temps.pop();
+        Ok(())
+    }
+
+    /// `return`: drops everything the function still owns, except what is returned.
+    fn emit_return(&mut self, value: Option<(&Expr, Atom)>) -> Result<(), Error> {
+        let mut moved_var = None;
+        let ret = match value {
+            Some((e, a)) => {
+                let t = self.ty(e);
+                if is_heap(&t) && !a.owned && self.drops.iter().flatten().any(|c| *c == a.c) {
+                    // Returning a variable: move it out instead of dup + drop.
+                    moved_var = Some(a.c.clone());
+                    a.c
+                } else {
+                    let v = self.own(&a, &t);
+                    let ct = self.ctype(&t, e.pos)?;
+                    let r = self.fresh("r");
+                    self.line(format!("{} {} = {};", ct, r, v));
+                    r
+                }
+            }
+            None => "0".into(),
+        };
+        let temps: Vec<String> = self
+            .temps
+            .iter()
+            .flatten()
+            .map(|(c, _)| c.clone())
+            .collect();
+        for c in temps.iter().rev() {
+            self.line(format!("tn_drop({});", c));
+        }
+        let vars: Vec<String> = self.drops.iter().flatten().cloned().collect();
+        for c in vars.iter().rev() {
+            if Some(c) != moved_var.as_ref() {
+                self.line(format!("tn_drop({});", c));
+            }
+        }
+        self.line(format!("return {};", ret));
+        Ok(())
+    }
+
+    fn stmt_inner(&mut self, s: &Stmt) -> Result<(), Error> {
         match s {
             Stmt::Let(n, ann, e) => {
                 let a = self.expr(e)?;
@@ -635,13 +835,20 @@ impl<'a> Gen<'a> {
                 };
                 let ct = self.ctype(&t, e.pos)?;
                 let v = self.fresh(&format!("v_{}_", n));
-                self.line(format!("{} {} = {};", ct, v, a));
-                self.var_types.insert(v.clone(), t);
-                self.scopes.last_mut().unwrap().insert(n.clone(), v);
+                let init = self.own(&a, &t);
+                self.line(format!("{} {} = {};", ct, v, init));
+                self.declare_var(n, v, t);
             }
             Stmt::Match(scrutinee, arms, _) => {
-                let m = self.expr(scrutinee)?;
                 let st = self.ty(scrutinee);
+                let a = self.expr(scrutinee)?;
+                // Hold a reference for the whole match, so arms may reassign the variable.
+                self.push_scope();
+                let m = self.fresh("m");
+                let init = self.own(&a, &st);
+                self.line(format!("tn_enum *{} = {};", m, init));
+                self.drops.last_mut().unwrap().push(m.clone());
+                self.drop_temps();
                 let Type::Enum(en, _) = &st else {
                     return Err(Error::new(
                         "compile",
@@ -649,12 +856,7 @@ impl<'a> Gen<'a> {
                         "`match` on a non-enum",
                     ));
                 };
-                let decl = self
-                    .prog
-                    .enums
-                    .iter()
-                    .find(|e| &e.name == en)
-                    .expect("checked");
+                let decl = self.enum_decl(en);
                 for (k, arm) in arms.iter().enumerate() {
                     let cond = match &arm.pattern {
                         Pattern::Wildcard(_) => "1".to_string(),
@@ -673,7 +875,7 @@ impl<'a> Gen<'a> {
                         cond
                     ));
                     self.ind += 1;
-                    let mut scope = HashMap::new();
+                    self.push_scope();
                     if let Pattern::Variant(v, binds, _) = &arm.pattern {
                         let var = decl
                             .variants
@@ -685,44 +887,70 @@ impl<'a> Gen<'a> {
                             let ft = self.field_ty(&st, &decl.params, ft);
                             let ct = self.ctype(&ft, *pos)?;
                             let cv = self.fresh(&format!("v_{}_", name));
-                            self.line(format!(
-                                "{} {} = {};",
-                                ct,
-                                cv,
-                                from_val(&ft, &format!("{}->f[{}]", m, i))
-                            ));
-                            self.var_types.insert(cv.clone(), ft);
-                            scope.insert(name.clone(), cv);
+                            let init =
+                                Self::dup_of(&ft, from_val(&ft, &format!("{}->f[{}]", m, i)));
+                            self.line(format!("{} {} = {};", ct, cv, init));
+                            self.declare_var(name, cv, ft);
                         }
                     }
-                    self.scopes.push(scope);
                     self.block(&arm.body)?;
-                    self.scopes.pop();
+                    self.pop_scope();
                     self.ind -= 1;
                 }
                 if !arms.is_empty() {
                     self.line("}");
                 }
+                self.pop_scope();
             }
             Stmt::SetField(n, path, e, _) => {
-                let a = self.expr(e)?;
                 let v = self.lookup(n);
                 let t = self.var_types[&v].clone();
-                let updated = self.set_path(&v, &t, path, &a)?;
+                // `p.f = g(p.f)`: the single read of `p.f` moves the field out of `p`,
+                // so `g` can update it in place (e.g. `c.log = push(c.log, x)`).
+                if path.len() == 1 && reads_once(e, n) && reads_field(e, n, &path[0].0) {
+                    self.movable_field = Some((v.clone(), path[0].0.clone()));
+                }
+                let a = self.expr(e)?;
+                self.movable_field = None;
+                let vt = self.ty(e);
+                let val = self.own(&a, &vt);
+                // The variable's reference moves into the update, which reuses the
+                // record's memory when nothing else shares it.
+                let updated = self.set_path(&v, &t, path, &val)?;
+                self.drop_temps();
                 self.line(format!("{} = {};", v, updated));
             }
             Stmt::Assign(n, e, _) => {
-                let a = self.expr(e)?;
                 let v = self.lookup(n);
-                self.line(format!("{} = {};", v, a));
+                let t = self.var_types[&v].clone();
+                // `x = f(..x..)` with a single unconditional read of `x`: that read takes
+                // the old value (no dup), so in-place updates see a unique owner.
+                let movable = is_heap(&t) && reads_once(e, n);
+                if movable {
+                    self.movable = Some(v.clone());
+                }
+                let a = self.expr(e)?;
+                self.movable = None;
+                let new = self.own(&a, &t);
+                let ct = self.ctype(&t, e.pos)?;
+                let nv = self.fresh("n");
+                self.line(format!("{} {} = {};", ct, nv, new));
+                // The old value is either moved already, or among the temporaries, or
+                // (when not movable) still owned by the variable.
+                self.drop_temps();
+                if is_heap(&t) && !movable {
+                    self.line(format!("tn_drop({});", v));
+                }
+                self.line(format!("{} = {};", v, nv));
             }
             Stmt::Expr(e) => {
                 let a = self.expr(e)?;
-                self.line(format!("(void){};", a));
+                self.line(format!("(void){};", a.c));
             }
             Stmt::If(c, then, els) => {
                 let a = self.expr(c)?;
-                self.line(format!("if ({}) {{", a));
+                self.drop_temps();
+                self.line(format!("if ({}) {{", a.c));
                 self.nested(then)?;
                 if let Some(b) = els {
                     self.line("} else {");
@@ -733,43 +961,56 @@ impl<'a> Gen<'a> {
             Stmt::While(c, body) => {
                 self.line("while (1) {");
                 self.ind += 1;
+                self.temps.push(vec![]);
                 let a = self.expr(c)?;
-                self.line(format!("if (!{}) break;", a));
+                self.drop_temps();
+                self.temps.pop();
+                self.line(format!("if (!{}) break;", a.c));
                 self.ind -= 1;
                 self.nested(body)?;
                 self.line("}");
             }
             Stmt::For(n, e, body, _) => {
+                let t = self.ty(e);
                 let a = self.expr(e)?;
-                let (elem, src) = match self.ty(e) {
-                    Type::Str => (Type::Str, format!("tn_str_chars({})", a)),
-                    t => (elem_of(&t), a),
+                let (elem, src) = match &t {
+                    Type::Str => (Type::Str, format!("tn_str_chars({})", a.c)),
+                    t => (elem_of(t), self.own(&a, t)),
                 };
                 let ct = self.ctype(&elem, e.pos)?;
+                // The loop holds its own reference to the list, so the body may
+                // reassign the variable being iterated.
+                self.push_scope();
                 let (it, i) = (self.fresh("it"), self.fresh("i"));
                 self.line(format!("tn_list *{} = {};", it, src));
+                self.drops.last_mut().unwrap().push(it.clone());
+                self.drop_temps();
                 self.line(format!(
                     "for (int64_t {i} = 0; {i} < {it}->len; {i}++) {{",
                     i = i,
                     it = it
                 ));
                 self.ind += 1;
+                self.push_scope();
                 let v = self.fresh(&format!("v_{}_", n));
-                let item = from_val(&elem, &format!("tn_list_item({}, {})", it, i));
+                let item = Self::dup_of(
+                    &elem,
+                    from_val(&elem, &format!("tn_list_item({}, {})", it, i)),
+                );
                 self.line(format!("{} {} = {};", ct, v, item));
-                self.var_types.insert(v.clone(), elem.clone());
-                self.scopes.push([(n.clone(), v)].into());
+                self.declare_var(n, v, elem.clone());
                 self.block(body)?;
-                self.scopes.pop();
+                self.pop_scope();
                 self.ind -= 1;
                 self.line("}");
+                self.pop_scope();
             }
             Stmt::Return(e, _) => {
-                let a = match e {
-                    Some(e) => self.expr(e)?,
-                    None => "0".into(),
+                let value = match e {
+                    Some(e) => Some((e, self.expr(e)?)),
+                    None => None,
                 };
-                self.line(format!("return {};", a));
+                self.emit_return(value)?;
             }
             Stmt::Assert(e) => {
                 let msg = c_str(&format!("assertion failed: `{}`", e.text));
@@ -777,18 +1018,18 @@ impl<'a> Gen<'a> {
                     ExprKind::Binary(op, l, r) if !matches!(op, BinOp::And | BinOp::Or) => {
                         let (a, b) = (self.expr(l)?, self.expr(r)?);
                         let (lt, rt) = (self.ty(l), self.ty(r));
-                        let c = self.binop(*op, &lt, &a, &b, e)?;
+                        let c = self.binop(*op, &lt, &a.c, &b.c, e)?;
                         let (ld, rd) = (self.tydesc(&lt), self.tydesc(&rt));
                         self.line(format!(
                             "if (!{}) tn_fail(\"assertion\", {}, {}, tn_fmt(\"left side = %s, right side = %s\", tn_to_str({}, {}, true)->data, tn_to_str({}, {}, true)->data));",
-                            c, loc(e.pos), msg, to_val(&lt, &a), ld, to_val(&rt, &b), rd
+                            c, loc(e.pos), msg, to_val(&lt, &a.c), ld, to_val(&rt, &b.c), rd
                         ));
                     }
                     _ => {
                         let a = self.expr(e)?;
                         self.line(format!(
                             "if (!{}) tn_fail(\"assertion\", {}, {}, NULL);",
-                            a,
+                            a.c,
                             loc(e.pos),
                             msg
                         ));
@@ -799,26 +1040,45 @@ impl<'a> Gen<'a> {
         Ok(())
     }
 
-    /// Lowers `e` and returns a C "atom" (a variable or literal) holding its value.
-    fn expr(&mut self, e: &Expr) -> Result<String, Error> {
+    /// Lowers `e` and returns an atom (a variable or literal) holding its value.
+    fn expr(&mut self, e: &Expr) -> Result<Atom, Error> {
         let t = self.ty(e);
+        let plain = |c: String| Atom { c, owned: false };
         Ok(match &e.kind {
-            ExprKind::Int(n) => format!("INT64_C({})", n),
-            ExprKind::Bool(b) => b.to_string(),
-            ExprKind::Str(s) => self.lit(s),
-            ExprKind::Var(n) => self.lookup(n),
+            ExprKind::Int(n) => plain(format!("INT64_C({})", n)),
+            ExprKind::Bool(b) => plain(b.to_string()),
+            ExprKind::Str(s) => plain(self.lit(s)),
+            ExprKind::Var(n) => {
+                let c = self.lookup(n);
+                if self.movable.as_ref() == Some(&c) {
+                    // The single read in `x = ...`: take x's reference as a temporary.
+                    self.movable = None;
+                    self.temps.last_mut().unwrap().push((c.clone(), t.clone()));
+                    Atom { c, owned: true }
+                } else {
+                    plain(c)
+                }
+            }
             ExprKind::List(items) => {
                 let elem = elem_of(&t);
-                let mut vals = vec![];
+                let mut atoms = vec![];
                 for it in items {
-                    let a = self.expr(it)?;
-                    vals.push(to_val(&elem, &a));
+                    atoms.push(self.expr(it)?);
                 }
+                let vals: Vec<String> = atoms
+                    .iter()
+                    .map(|a| {
+                        let v = self.own(a, &elem);
+                        to_val(&elem, &v)
+                    })
+                    .collect();
+                let d = self.tydesc(&t);
                 let init = if vals.is_empty() {
-                    "tn_list_new(0)".to_string()
+                    format!("tn_list_new({}, 0)", d)
                 } else {
                     format!(
-                        "tn_list_from({}, (tn_val[]){{{}}})",
+                        "tn_list_from({}, {}, (tn_val[]){{{}}})",
+                        d,
                         vals.len(),
                         vals.join(", ")
                     )
@@ -830,34 +1090,37 @@ impl<'a> Gen<'a> {
                 self.tmp(
                     &t,
                     e.pos,
-                    format!("tn_neg({}, {}, {})", a, loc(e.pos), c_str(&e.text)),
+                    format!("tn_neg({}, {}, {})", a.c, loc(e.pos), c_str(&e.text)),
                 )?
             }
             ExprKind::Unary(UnOp::Not, x) => {
                 let a = self.expr(x)?;
-                self.tmp(&t, e.pos, format!("!{}", a))?
+                self.tmp(&t, e.pos, format!("!{}", a.c))?
             }
             ExprKind::Binary(op @ (BinOp::And | BinOp::Or), l, r) => {
                 // Short-circuit: the right side's temporaries live inside the `if`.
                 let a = self.expr(l)?;
                 let name = self.fresh("t");
-                self.line(format!("bool {} = {};", name, a));
+                self.line(format!("bool {} = {};", name, a.c));
                 self.line(format!(
                     "if ({}{}) {{",
                     if *op == BinOp::And { "" } else { "!" },
                     name
                 ));
                 self.ind += 1;
+                self.temps.push(vec![]);
                 let b = self.expr(r)?;
-                self.line(format!("{} = {};", name, b));
+                self.line(format!("{} = {};", name, b.c));
+                self.drop_temps();
+                self.temps.pop();
                 self.ind -= 1;
                 self.line("}");
-                name
+                plain(name)
             }
             ExprKind::Binary(op, l, r) => {
                 let (a, b) = (self.expr(l)?, self.expr(r)?);
                 let lt = self.ty(l);
-                let init = self.binop(*op, &lt, &a, &b, e)?;
+                let init = self.binop(*op, &lt, &a.c, &b.c, e)?;
                 self.tmp(&t, e.pos, init)?
             }
             ExprKind::Record(name, fields) => {
@@ -868,18 +1131,19 @@ impl<'a> Gen<'a> {
                     atoms.insert(f.as_str(), a);
                 }
                 let decl = self.records[name.as_str()];
-                let vals: Vec<String> = decl
-                    .fields
-                    .iter()
-                    .map(|(f, ft, _)| {
-                        to_val(&self.field_ty(&t, &decl.params, ft), &atoms[f.as_str()])
-                    })
-                    .collect();
+                let mut vals = vec![];
+                for (f, ft, _) in &decl.fields {
+                    let ft = self.field_ty(&t, &decl.params, ft);
+                    let v = self.own(&atoms[f.as_str()], &ft);
+                    vals.push(to_val(&ft, &v));
+                }
+                let d = self.tydesc(&t);
                 let init = if vals.is_empty() {
-                    "tn_rec_new(0, NULL)".to_string()
+                    format!("tn_rec_new({}, 0, NULL)", d)
                 } else {
                     format!(
-                        "tn_rec_new({}, (tn_val[]){{{}}})",
+                        "tn_rec_new({}, {}, (tn_val[]){{{}}})",
+                        d,
                         vals.len(),
                         vals.join(", ")
                     )
@@ -893,23 +1157,36 @@ impl<'a> Gen<'a> {
                     atoms.insert(f.as_str(), a);
                 }
                 let (decl, tag) = self.prog.variant(name).expect("checked");
-                let vals: Vec<String> = decl.variants[tag]
-                    .fields
-                    .iter()
-                    .map(|(f, ft, _)| {
-                        to_val(&self.field_ty(&t, &decl.params, ft), &atoms[f.as_str()])
-                    })
-                    .collect();
+                let mut vals = vec![];
+                for (f, ft, _) in &decl.variants[tag].fields {
+                    let ft = self.field_ty(&t, &decl.params, ft);
+                    let v = self.own(&atoms[f.as_str()], &ft);
+                    vals.push(to_val(&ft, &v));
+                }
+                let d = self.tydesc(&t);
                 let init = if vals.is_empty() {
-                    format!("tn_enum_new({}, 0, NULL)", tag)
+                    format!("tn_enum_new({}, {}, 0, NULL)", d, tag)
                 } else {
                     format!(
-                        "tn_enum_new({}, {}, (tn_val[]){{{}}})",
+                        "tn_enum_new({}, {}, {}, (tn_val[]){{{}}})",
+                        d,
                         tag,
                         vals.len(),
                         vals.join(", ")
                     )
                 };
+                self.tmp(&t, e.pos, init)?
+            }
+            ExprKind::Field(target, f)
+                if matches!(&target.kind, ExprKind::Var(n)
+                    if self.movable_field.as_ref() == Some(&(self.lookup(n), f.clone()))) =>
+            {
+                let (c, _) = self.movable_field.take().expect("checked above");
+                let Type::Record(rn, _) = self.ty(target) else {
+                    return Err(Error::new("compile", e.pos, "field access on a non-record"));
+                };
+                let (i, _) = self.records[rn.as_str()].field(f).expect("checked");
+                let init = from_val(&t, &format!("tn_rec_take({}, {})", c, i));
                 self.tmp(&t, e.pos, init)?
             }
             ExprKind::Field(target, f) => {
@@ -918,15 +1195,19 @@ impl<'a> Gen<'a> {
                     return Err(Error::new("compile", e.pos, "field access on a non-record"));
                 };
                 let (i, _) = self.records[rn.as_str()].field(f).expect("checked");
-                self.tmp(&t, e.pos, from_val(&t, &format!("{}->f[{}]", a, i)))?
+                let init = Self::dup_of(&t, from_val(&t, &format!("{}->f[{}]", a.c, i)));
+                self.tmp(&t, e.pos, init)?
             }
             ExprKind::Index(target, idx) => {
                 let (a, i) = (self.expr(target)?, self.expr(idx)?);
                 let init = match self.ty(target) {
-                    Type::Str => format!("tn_str_at({}, {}, {})", a, i, loc(e.pos)),
-                    tt => from_val(
-                        &elem_of(&tt),
-                        &format!("tn_list_get({}, {}, {})", a, i, loc(e.pos)),
+                    Type::Str => format!("tn_str_at({}, {}, {})", a.c, i.c, loc(e.pos)),
+                    tt => Self::dup_of(
+                        &t,
+                        from_val(
+                            &elem_of(&tt),
+                            &format!("tn_list_get({}, {}, {})", a.c, i.c, loc(e.pos)),
+                        ),
                     ),
                 };
                 self.tmp(&t, e.pos, init)?
@@ -949,17 +1230,24 @@ impl<'a> Gen<'a> {
                             .collect();
                         self.instance(f, targs, e.pos)?
                     };
-                    atoms.push(loc(e.pos));
-                    format!("g_{}({})", cname, atoms.join(", "))
+                    // Functions take ownership of their arguments.
+                    let mut cargs: Vec<String> = atoms
+                        .iter()
+                        .zip(&tys)
+                        .map(|(a, t)| self.own(a, t))
+                        .collect();
+                    cargs.push(loc(e.pos));
+                    format!("g_{}({})", cname, cargs.join(", "))
                 } else {
-                    self.builtin(name, &atoms, &tys, e.pos)?
+                    self.builtin(name, &atoms, &tys, &t, e.pos)?
                 };
                 self.tmp(&t, e.pos, init)?
             }
         })
     }
 
-    /// A copy of record `cur` (of type `t`) with the field at `path` set to `val`.
+    /// `cur.path = val`, taking ownership of `cur` and `val`. Returns an unregistered
+    /// C variable holding the updated record.
     fn set_path(
         &mut self,
         cur: &str,
@@ -981,14 +1269,27 @@ impl<'a> Gen<'a> {
         let new = if path.len() == 1 {
             val.to_string()
         } else {
-            let inner = self.tmp(&ft, *pos, from_val(&ft, &format!("{}->f[{}]", cur, i)))?;
+            let ct = self.ctype(&ft, *pos)?;
+            let inner = self.fresh("u");
+            self.line(format!(
+                "{} {} = {};",
+                ct,
+                inner,
+                from_val(&ft, &format!("tn_rec_take({}, {})", cur, i))
+            ));
             self.set_path(&inner, &ft, &path[1..], val)?
         };
-        self.tmp(
-            t,
-            *pos,
-            format!("tn_rec_set({}, {}, {})", cur, i, to_val(&ft, &new)),
-        )
+        let ct = self.ctype(t, *pos)?;
+        let r = self.fresh("u");
+        self.line(format!(
+            "{} {} = tn_rec_set({}, {}, {});",
+            ct,
+            r,
+            cur,
+            i,
+            to_val(&ft, &new)
+        ));
+        Ok(r)
     }
 
     fn binop(&mut self, op: BinOp, lt: &Type, a: &str, b: &str, e: &Expr) -> Result<String, Error> {
@@ -1032,14 +1333,17 @@ impl<'a> Gen<'a> {
         })
     }
 
+    /// Built-ins borrow their arguments, except `push`, which takes ownership.
     fn builtin(
         &mut self,
         name: &str,
-        a: &[String],
+        atoms: &[Atom],
         tys: &[Type],
+        t: &Type,
         pos: Pos,
     ) -> Result<String, Error> {
         let at = loc(pos);
+        let a: Vec<String> = atoms.iter().map(|x| x.c.clone()).collect();
         Ok(match name {
             "print" => {
                 let mut parts = vec![];
@@ -1075,11 +1379,12 @@ impl<'a> Gen<'a> {
                 _ => a[0].clone(),
             },
             "abs" => format!("tn_abs({}, {})", a[0], at),
-            "push" => format!(
-                "tn_list_push({}, {})",
-                a[0],
-                to_val(&elem_of(&tys[0]), &a[1])
-            ),
+            "push" => {
+                let elem = elem_of(t);
+                let list = self.own(&atoms[0], t);
+                let item = self.own(&atoms[1], &elem);
+                format!("tn_list_push({}, {})", list, to_val(&elem, &item))
+            }
             "range" if a.len() == 1 => format!("tn_range(INT64_C(0), {})", a[0]),
             "range" => format!("tn_range({}, {})", a[0], a[1]),
             "join" => {
@@ -1113,4 +1418,59 @@ impl<'a> Gen<'a> {
             }
         })
     }
+}
+
+/// True when `e` contains the field read `name.field`.
+fn reads_field(e: &Expr, name: &str, field: &str) -> bool {
+    let any = |xs: &[Expr]| xs.iter().any(|x| reads_field(x, name, field));
+    match &e.kind {
+        ExprKind::Field(t, f) => {
+            (f == field && matches!(&t.kind, ExprKind::Var(n) if n == name))
+                || reads_field(t, name, field)
+        }
+        ExprKind::List(xs) | ExprKind::Call(_, xs) => any(xs),
+        ExprKind::Unary(_, x) => reads_field(x, name, field),
+        ExprKind::Binary(_, l, r) | ExprKind::Index(l, r) => {
+            reads_field(l, name, field) || reads_field(r, name, field)
+        }
+        ExprKind::Record(_, fs) | ExprKind::Variant(_, fs) => {
+            fs.iter().any(|(_, x, _)| reads_field(x, name, field))
+        }
+        _ => false,
+    }
+}
+
+/// True when `e` reads variable `name` exactly once, and not only conditionally
+/// (on the right of `and` / `or`).
+fn reads_once(e: &Expr, name: &str) -> bool {
+    fn walk(e: &Expr, name: &str, conditional: bool, count: &mut usize, cond_read: &mut bool) {
+        let mut go = |x: &Expr, c: bool| walk(x, name, c, count, cond_read);
+        match &e.kind {
+            ExprKind::Var(n) if n == name => {
+                *count += 1;
+                if conditional {
+                    *cond_read = true;
+                }
+            }
+            ExprKind::Int(_) | ExprKind::Str(_) | ExprKind::Bool(_) | ExprKind::Var(_) => {}
+            ExprKind::List(xs) | ExprKind::Call(_, xs) => {
+                xs.iter().for_each(|x| go(x, conditional))
+            }
+            ExprKind::Unary(_, x) | ExprKind::Field(x, _) => go(x, conditional),
+            ExprKind::Binary(BinOp::And | BinOp::Or, l, r) => {
+                go(l, conditional);
+                go(r, true);
+            }
+            ExprKind::Binary(_, l, r) | ExprKind::Index(l, r) => {
+                go(l, conditional);
+                go(r, conditional);
+            }
+            ExprKind::Record(_, fs) | ExprKind::Variant(_, fs) => {
+                fs.iter().for_each(|(_, x, _)| go(x, conditional))
+            }
+        }
+    }
+    let (mut count, mut cond_read) = (0, false);
+    walk(e, name, false, &mut count, &mut cond_read);
+    count == 1 && !cond_read
 }

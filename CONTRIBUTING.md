@@ -33,6 +33,7 @@ tests/
   cases/       snapshot tests: *.gly programs and their *.expected output
   cases.rs     the test harness
   fix/         a broken program, an honest fix and "cheating" fixes for the guard tests
+  memory/      programs checked for leaks, use-after-free and in-place reuse
 examples/      example programs
 ```
 
@@ -63,6 +64,17 @@ cargo test --release
 ```
 
 CI runs the same checks on Linux and macOS.
+
+## Memory in the native backend
+
+Native code uses reference counting. If you touch `codegen.rs` or `runtime.c`, follow the ownership rules (they're also described at the top of `runtime.c`):
+
+- Temporaries own their value; variables own theirs until their scope ends. Reading a variable *borrows* it.
+- Functions take ownership of their arguments and return an owned result.
+- Runtime functions borrow their arguments and return owned results, except where a comment says they take ownership (`tn_list_push`, `tn_rec_set`, constructors).
+- In codegen, use `own()` when a value is stored or passed on, and let statement and scope cleanup drop the rest.
+
+`cargo test` checks this: every program in `tests/memory/` and `tests/cases/` is built with AddressSanitizer and checked for use-after-free, double free and leaks. Add a case to `tests/memory/` when you add a feature that creates heap values.
 
 ## Error messages
 

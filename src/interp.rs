@@ -240,16 +240,21 @@ impl<'a> Interp<'a> {
                 ));
             }
         }
-        let inputs: Vec<String> = f
-            .params
-            .iter()
-            .zip(&args)
-            .map(|(p, a)| format!("{} = {}", p.name, a.repr()))
-            .collect();
-        let inputs = if inputs.is_empty() {
-            "no arguments".to_string()
-        } else {
-            inputs.join(", ")
+        // Only needed for error messages, so only formatted on failure (formatting a
+        // large argument on every call would make recursion over big values quadratic).
+        let arg_values = args.clone();
+        let inputs = move || {
+            let parts: Vec<String> = f
+                .params
+                .iter()
+                .zip(&arg_values)
+                .map(|(p, a)| format!("{} = {}", p.name, a.repr()))
+                .collect();
+            if parts.is_empty() {
+                "no arguments".to_string()
+            } else {
+                parts.join(", ")
+            }
         };
         let frame: HashMap<String, Value> =
             f.params.iter().map(|p| p.name.clone()).zip(args).collect();
@@ -269,7 +274,7 @@ impl<'a> Interp<'a> {
         &mut self,
         f: &'a Func,
         call_pos: Pos,
-        inputs: &str,
+        inputs: &dyn Fn() -> String,
         originals: Option<HashMap<String, Value>>,
     ) -> R<Value> {
         // A failed precondition is the caller's fault, so it is reported at the call site.
@@ -280,7 +285,7 @@ impl<'a> Interp<'a> {
                     call_pos,
                     format!("precondition of `{}` violated: `{}`", f.name, c.text),
                 )
-                .hint(format!("called with {}", inputs)));
+                .hint(format!("called with {}", inputs())));
             }
         }
         let v = match self.block(&f.body)? {
@@ -299,7 +304,7 @@ impl<'a> Interp<'a> {
                     v.repr()
                 ),
             )
-            .hint(format!("called with {}", inputs)));
+            .hint(format!("called with {}", inputs())));
         }
         // A failed postcondition is the function's own fault, so it is reported at the clause.
         if let Some(mut frame) = originals {
@@ -314,7 +319,7 @@ impl<'a> Interp<'a> {
                     )
                     .hint(format!(
                         "called with {}, returned {}",
-                        inputs,
+                        inputs(),
                         v.repr()
                     )));
                 }

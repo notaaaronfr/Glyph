@@ -1,6 +1,12 @@
 /* ---- Glyph native runtime (embedded into every compiled program) ----
  * Expects TN_FILE_NAME and TN_SOURCE to be defined first, for error messages.
- * Memory is never freed in v0.1: programs are short-lived. */
+ *
+ * Memory: every heap value (Str, List, record, enum) starts with a header holding a
+ * reference count and its type. The compiler inserts tn_dup / tn_drop so that a value
+ * is freed as soon as its last owner is done with it: no garbage collector, no pauses.
+ * Glyph values are immutable and built bottom-up, so reference cycles cannot exist and
+ * reference counting alone reclaims everything. When a value has exactly one owner,
+ * updates (push, record field assignment) happen in place instead of copying. */
 
 #include <errno.h>
 #include <stdarg.h>
@@ -18,28 +24,35 @@ typedef uint8_t tn_unit;
 typedef struct { int32_t line, col; } tn_loc;
 #define TN_LOC(l, c) ((tn_loc){(l), (c)})
 
-/* Strings are immutable UTF-8 with a cached character count; data is NUL-terminated. */
-typedef struct { int64_t len; int64_t nchars; char data[]; } tn_str;
+struct tn_type;
 
-/* Every Glyph value fits in 8 bytes: Int, Bool, Unit, or a pointer to a Str / List. */
+/* The header of every heap value. A negative count marks an immortal value
+ * (string literals), which dup and drop leave alone. */
+typedef struct { int64_t rc; const struct tn_type *ty; } tn_hdr;
+#define TN_IMMORTAL (-1)
+
+/* Strings are immutable UTF-8 with a cached character count; data is NUL-terminated. */
+typedef struct { tn_hdr h; int64_t len; int64_t nchars; char data[]; } tn_str;
+
+/* Every Glyph value fits in 8 bytes: Int, Bool, Unit, or a pointer to a heap value. */
 typedef union { int64_t i; bool b; void *p; } tn_val;
 #define TN_I(x) ((tn_val){.i = (x)})
 #define TN_B(x) ((tn_val){.b = (x)})
 #define TN_P(x) ((tn_val){.p = (void *)(x)})
 
-/* Lists have value semantics. Several lists may share one buffer: each sees only its
- * first `len` items, and items are never overwritten, so the list that ends at the
- * buffer's tip can be extended in place. That makes `xs = push(xs, v)` O(1). */
-typedef struct { int64_t cap, used; tn_val items[]; } tn_buf;
-typedef struct { tn_buf *buf; int64_t len; } tn_list;
+/* Lists have value semantics. Several list headers may share one buffer: each sees
+ * only its first `len` items, and items are never overwritten, so the list that ends
+ * at the buffer's tip can be extended in place. The buffer owns items[0..used) and is
+ * itself reference counted by the headers that use it. */
+typedef struct { int64_t rc; int64_t cap, used; const struct tn_type *elem; tn_val items[]; } tn_buf;
+typedef struct { tn_hdr h; tn_buf *buf; int64_t len; } tn_list;
 
-/* Records are immutable arrays of fields in declaration order: `p.x = v` copies. */
-typedef struct { int64_t n; tn_val f[]; } tn_rec;
+/* Records are arrays of fields in declaration order. */
+typedef struct { tn_hdr h; int64_t n; tn_val f[]; } tn_rec;
 
 /* Enum values: which variant (`tag`, its index in the declaration) and its fields. */
-typedef struct { int64_t tag; tn_val f[]; } tn_enum;
+typedef struct { tn_hdr h; int64_t tag; tn_val f[]; } tn_enum;
 
-struct tn_type;
 typedef struct {
     const char *name;
     int64_t nfields;
@@ -58,9 +71,15 @@ typedef struct tn_type {
     const tn_variant *variants;               /* enums */
 } tn_type;
 static const tn_type TY_i = {TN_INT, 0}, TY_s = {TN_STR, 0}, TY_b = {TN_BOOL, 0}, TY_u = {TN_UNIT, 0};
+static const tn_type TY_li = {TN_LIST, &TY_i}, TY_ls = {TN_LIST, &TY_s};
 
 static int64_t tn_depth = 0;
 static uint64_t tn_rng = 1;
+
+/* ---- allocation, reference counting ---- */
+
+/* Counters for GLYPH_MEMSTATS=1 and the leak tests. */
+static int64_t tn_allocs = 0, tn_frees = 0, tn_live = 0, tn_peak = 0;
 
 static void *tn_alloc(size_t n) {
     void *p = malloc(n ? n : 1);
@@ -69,6 +88,111 @@ static void *tn_alloc(size_t n) {
         exit(1);
     }
     return p;
+}
+
+/* Allocates a counted heap block (a value or a list buffer). */
+static void *tn_alloc_obj(size_t n) {
+    tn_allocs++;
+    if (++tn_live > tn_peak) tn_peak = tn_live;
+    return tn_alloc(n);
+}
+
+static void tn_free_obj(void *p) {
+    tn_frees++;
+    tn_live--;
+    free(p);
+}
+
+static inline bool tn_is_heap(const tn_type *t) {
+    return t->kind == TN_STR || t->kind == TN_LIST || t->kind == TN_RECORD || t->kind == TN_ENUM;
+}
+
+static inline void *tn_dup(void *p) {
+    tn_hdr *o = p;
+    if (o && o->rc > 0) o->rc++;
+    return p;
+}
+
+static inline tn_val tn_dup_val(tn_val v, const tn_type *t) {
+    if (tn_is_heap(t)) tn_dup(v.p);
+    return v;
+}
+
+/* Values whose count reached zero, waiting to be freed. Freeing uses this explicit
+ * stack instead of recursion, so dropping a million-node structure can't overflow
+ * the C stack. List buffers are tagged with the low bit. */
+static void **tn_dead = NULL;
+static int64_t tn_dead_len = 0, tn_dead_cap = 0;
+
+static void tn_dead_push(void *p) {
+    if (tn_dead_len == tn_dead_cap) {
+        tn_dead_cap = tn_dead_cap ? tn_dead_cap * 2 : 256;
+        tn_dead = realloc(tn_dead, sizeof(void *) * tn_dead_cap);
+        if (!tn_dead) tn_alloc((size_t)-1);
+    }
+    tn_dead[tn_dead_len++] = p;
+}
+
+/* Releases one reference to child `v` of type `t`; queues it if that was the last. */
+static inline void tn_release(tn_val v, const tn_type *t) {
+    if (!tn_is_heap(t) || !v.p) return;
+    tn_hdr *o = v.p;
+    if (o->rc > 0 && --o->rc == 0) tn_dead_push(o);
+}
+
+static void tn_release_buf(tn_buf *b) {
+    if (--b->rc == 0) tn_dead_push((void *)((uintptr_t)b | 1));
+}
+
+static void tn_collect(void) {
+    while (tn_dead_len > 0) {
+        void *p = tn_dead[--tn_dead_len];
+        if ((uintptr_t)p & 1) {
+            tn_buf *b = (tn_buf *)((uintptr_t)p & ~(uintptr_t)1);
+            for (int64_t i = 0; i < b->used; i++) tn_release(b->items[i], b->elem);
+            tn_free_obj(b);
+            continue;
+        }
+        tn_hdr *o = p;
+        switch (o->ty->kind) {
+        case TN_LIST:
+            tn_release_buf(((tn_list *)o)->buf);
+            break;
+        case TN_RECORD: {
+            tn_rec *r = (tn_rec *)o;
+            for (int64_t i = 0; i < r->n; i++) tn_release(r->f[i], o->ty->ftypes[i]);
+            break;
+        }
+        case TN_ENUM: {
+            tn_enum *e = (tn_enum *)o;
+            const tn_variant *var = &o->ty->variants[e->tag];
+            for (int64_t i = 0; i < var->nfields; i++) tn_release(e->f[i], var->ftypes[i]);
+            break;
+        }
+        default:
+            break;
+        }
+        tn_free_obj(o);
+    }
+}
+
+static inline void tn_drop(void *p) {
+    tn_hdr *o = p;
+    if (o && o->rc > 0 && --o->rc == 0) {
+        tn_dead_push(o);
+        tn_collect();
+    }
+}
+
+static inline void tn_drop_val(tn_val v, const tn_type *t) {
+    if (tn_is_heap(t)) tn_drop(v.p);
+}
+
+static void tn_memstats(void) {
+    if (!getenv("GLYPH_MEMSTATS")) return;
+    fflush(stdout);
+    fprintf(stderr, "glyph memstats: %lld allocated, %lld freed, %lld live at exit, peak %lld live\n",
+            (long long)tn_allocs, (long long)tn_frees, (long long)tn_live, (long long)tn_peak);
 }
 
 static const char *tn_fmt(const char *fmt, ...) {
@@ -167,7 +291,9 @@ static int64_t tn_utf8_count(const char *s, int64_t n) {
 static int64_t tn_utf8_width(unsigned char c) { return c < 0x80 ? 1 : c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : 2; }
 
 static tn_str *tn_str_raw(int64_t n) {
-    tn_str *s = tn_alloc(sizeof(tn_str) + n + 1);
+    tn_str *s = tn_alloc_obj(sizeof(tn_str) + n + 1);
+    s->h.rc = 1;
+    s->h.ty = &TY_s;
     s->len = n;
     s->data[n] = 0;
     return s;
@@ -176,6 +302,18 @@ static tn_str *tn_str_raw(int64_t n) {
 static tn_str *tn_str_from(const char *p, int64_t n) {
     tn_str *s = tn_str_raw(n);
     memcpy(s->data, p, n);
+    s->nchars = tn_utf8_count(p, n);
+    return s;
+}
+
+/* A string literal: never counted, never freed. */
+static tn_str *tn_str_static(const char *p, int64_t n) {
+    tn_str *s = tn_alloc(sizeof(tn_str) + n + 1);
+    s->h.rc = TN_IMMORTAL;
+    s->h.ty = &TY_s;
+    s->len = n;
+    memcpy(s->data, p, n);
+    s->data[n] = 0;
     s->nchars = tn_utf8_count(p, n);
     return s;
 }
@@ -220,53 +358,93 @@ static tn_str *tn_str_at(tn_str *s, int64_t i, tn_loc at) {
 
 /* ---- lists ---- */
 
-static tn_list *tn_list_new(int64_t cap) {
+static tn_buf *tn_buf_new(const tn_type *elem, int64_t cap) {
     if (cap < 4) cap = 4;
-    tn_buf *b = tn_alloc(sizeof(tn_buf) + sizeof(tn_val) * cap);
+    tn_buf *b = tn_alloc_obj(sizeof(tn_buf) + sizeof(tn_val) * cap);
+    b->rc = 1;
     b->cap = cap;
     b->used = 0;
-    tn_list *l = tn_alloc(sizeof(tn_list));
-    l->buf = b;
+    b->elem = elem;
+    return b;
+}
+
+/* `ty` is the list's own type; its elem says how to release the items. */
+static tn_list *tn_list_new(const tn_type *ty, int64_t cap) {
+    tn_list *l = tn_alloc_obj(sizeof(tn_list));
+    l->h.rc = 1;
+    l->h.ty = ty;
+    l->buf = tn_buf_new(ty->elem, cap);
     l->len = 0;
     return l;
 }
 
-static tn_list *tn_list_from(int64_t n, const tn_val *items) {
-    tn_list *l = tn_list_new(n);
+/* Takes ownership of the n items. */
+static tn_list *tn_list_from(const tn_type *ty, int64_t n, const tn_val *items) {
+    tn_list *l = tn_list_new(ty, n);
     memcpy(l->buf->items, items, n * sizeof(tn_val));
     l->buf->used = l->len = n;
     return l;
 }
 
+/* A new buffer holding (shared) copies of l's items, with room for more. */
+static tn_buf *tn_buf_copy(tn_list *l, int64_t cap) {
+    tn_buf *nb = tn_buf_new(l->buf->elem, cap);
+    for (int64_t i = 0; i < l->len; i++) nb->items[i] = tn_dup_val(l->buf->items[i], nb->elem);
+    nb->used = l->len;
+    return nb;
+}
+
+/* push(l, v): takes ownership of both. With one owner, the list grows in place. */
 static tn_list *tn_list_push(tn_list *l, tn_val v) {
     tn_buf *b = l->buf;
-    tn_list *r = tn_alloc(sizeof(tn_list));
-    r->len = l->len + 1;
-    if (l->len == b->used && b->used < b->cap) {
-        b->items[b->used++] = v;
-        r->buf = b;
-        return r;
+    bool at_tip = l->len == b->used;
+    if (l->h.rc == 1) {
+        if (at_tip && b->used < b->cap) {
+            b->items[b->used++] = v;
+        } else if (at_tip && b->rc == 1) {
+            b->cap = b->cap * 2;
+            l->buf = b = realloc(b, sizeof(tn_buf) + sizeof(tn_val) * b->cap);
+            if (!b) tn_alloc((size_t)-1);
+            b->items[b->used++] = v;
+        } else {
+            tn_buf *nb = tn_buf_copy(l, l->len * 2 + 4);
+            nb->items[nb->used++] = v;
+            tn_release_buf(b);
+            tn_collect();
+            l->buf = nb;
+        }
+        l->len++;
+        return l;
     }
-    int64_t cap = l->len * 2 + 4;
-    tn_buf *nb = tn_alloc(sizeof(tn_buf) + sizeof(tn_val) * cap);
-    nb->cap = cap;
-    memcpy(nb->items, b->items, l->len * sizeof(tn_val));
-    nb->items[l->len] = v;
-    nb->used = r->len;
-    r->buf = nb;
+    /* Shared: build a new header, sharing the buffer when we're at its tip. */
+    tn_list *r = tn_alloc_obj(sizeof(tn_list));
+    r->h.rc = 1;
+    r->h.ty = l->h.ty;
+    r->len = l->len + 1;
+    if (at_tip && b->used < b->cap) {
+        b->items[b->used++] = v;
+        b->rc++;
+        r->buf = b;
+    } else {
+        r->buf = tn_buf_copy(l, l->len * 2 + 4);
+        r->buf->items[r->buf->used++] = v;
+    }
+    tn_drop(l);
     return r;
 }
 
 static tn_list *tn_list_cat(tn_list *a, tn_list *b) {
-    tn_list *l = tn_list_new(a->len + b->len);
-    memcpy(l->buf->items, a->buf->items, a->len * sizeof(tn_val));
-    memcpy(l->buf->items + a->len, b->buf->items, b->len * sizeof(tn_val));
+    tn_list *l = tn_list_new(a->h.ty, a->len + b->len);
+    const tn_type *elem = a->h.ty->elem;
+    for (int64_t i = 0; i < a->len; i++) l->buf->items[i] = tn_dup_val(a->buf->items[i], elem);
+    for (int64_t i = 0; i < b->len; i++) l->buf->items[a->len + i] = tn_dup_val(b->buf->items[i], elem);
     l->buf->used = l->len = a->len + b->len;
     return l;
 }
 
 static inline tn_val tn_list_item(tn_list *l, int64_t i) { return l->buf->items[i]; }
 
+/* Borrowed: the caller dups it if it keeps it. */
 static inline tn_val tn_list_get(tn_list *l, int64_t i, tn_loc at) {
     if (i < 0 || i >= l->len)
         tn_fail("runtime", at, tn_fmt("index %lld out of bounds (length %lld)", (long long)i, (long long)l->len), NULL);
@@ -275,14 +453,14 @@ static inline tn_val tn_list_get(tn_list *l, int64_t i, tn_loc at) {
 
 static tn_list *tn_range(int64_t a, int64_t b) {
     int64_t n = b > a ? b - a : 0;
-    tn_list *l = tn_list_new(n);
+    tn_list *l = tn_list_new(&TY_li, n);
     for (int64_t i = 0; i < n; i++) l->buf->items[i] = TN_I(a + i);
     l->buf->used = l->len = n;
     return l;
 }
 
 static tn_list *tn_str_chars(tn_str *s) {
-    tn_list *l = tn_list_new(s->nchars);
+    tn_list *l = tn_list_new(&TY_ls, s->nchars);
     for (int64_t off = 0; off < s->len;) {
         int64_t w = tn_utf8_width(s->data[off]);
         l->buf->items[l->len++] = TN_P(tn_str_from(s->data + off, w));
@@ -294,7 +472,7 @@ static tn_list *tn_str_chars(tn_str *s) {
 
 static tn_list *tn_split(tn_str *s, tn_str *sep, tn_loc at) {
     if (sep->len == 0) tn_fail("runtime", at, "invalid arguments to `split`: the separator must not be empty", NULL);
-    tn_list *l = tn_list_new(4);
+    tn_list *l = tn_list_new(&TY_ls, 4);
     int64_t start = 0, pos;
     while ((pos = tn_find(s, sep, start)) >= 0) {
         l = tn_list_push(l, TN_P(tn_str_from(s->data + start, pos - start)));
@@ -303,23 +481,52 @@ static tn_list *tn_split(tn_str *s, tn_str *sep, tn_loc at) {
     return tn_list_push(l, TN_P(tn_str_from(s->data + start, s->len - start)));
 }
 
-/* ---- records ---- */
+/* ---- records and enums ---- */
 
-static tn_rec *tn_rec_new(int64_t n, const tn_val *fields) {
-    tn_rec *r = tn_alloc(sizeof(tn_rec) + sizeof(tn_val) * n);
+/* Takes ownership of the fields. */
+static tn_rec *tn_rec_new(const tn_type *ty, int64_t n, const tn_val *fields) {
+    tn_rec *r = tn_alloc_obj(sizeof(tn_rec) + sizeof(tn_val) * n);
+    r->h.rc = 1;
+    r->h.ty = ty;
     r->n = n;
     if (n) memcpy(r->f, fields, sizeof(tn_val) * n);
     return r;
 }
 
+/* `r.i = v`: takes ownership of r and v. With one owner, the record is updated in place. */
 static tn_rec *tn_rec_set(tn_rec *r, int64_t i, tn_val v) {
-    tn_rec *c = tn_rec_new(r->n, r->f);
-    c->f[i] = v;
+    const tn_type *const *ft = r->h.ty->ftypes;
+    if (r->h.rc == 1) {
+        tn_drop_val(r->f[i], ft[i]);
+        r->f[i] = v;
+        return r;
+    }
+    tn_rec *c = tn_alloc_obj(sizeof(tn_rec) + sizeof(tn_val) * r->n);
+    c->h.rc = 1;
+    c->h.ty = r->h.ty;
+    c->n = r->n;
+    for (int64_t k = 0; k < r->n; k++) c->f[k] = k == i ? v : tn_dup_val(r->f[k], ft[k]);
+    tn_drop(r);
     return c;
 }
 
-static tn_enum *tn_enum_new(int64_t tag, int64_t n, const tn_val *fields) {
-    tn_enum *e = tn_alloc(sizeof(tn_enum) + sizeof(tn_val) * n);
+/* Field i of r, owned by the caller, for a nested update `r.i.j = v`. With one owner
+ * the field is moved out (its slot is refilled by the tn_rec_set that follows), so the
+ * inner value can be updated in place too. */
+static tn_val tn_rec_take(tn_rec *r, int64_t i) {
+    tn_val v = r->f[i];
+    if (r->h.rc == 1) {
+        r->f[i] = TN_P(NULL);
+        return v;
+    }
+    return tn_dup_val(v, r->h.ty->ftypes[i]);
+}
+
+/* Takes ownership of the fields. */
+static tn_enum *tn_enum_new(const tn_type *ty, int64_t tag, int64_t n, const tn_val *fields) {
+    tn_enum *e = tn_alloc_obj(sizeof(tn_enum) + sizeof(tn_val) * n);
+    e->h.rc = 1;
+    e->h.ty = ty;
     e->tag = tag;
     if (n) memcpy(e->f, fields, sizeof(tn_val) * n);
     return e;
@@ -423,8 +630,9 @@ static void tn_show(tn_sb *b, tn_val v, const tn_type *t, bool quote) {
     }
 }
 
+/* Always returns a string the caller owns. */
 static tn_str *tn_to_str(tn_val v, const tn_type *t, bool quote) {
-    if (t->kind == TN_STR && !quote) return v.p;
+    if (t->kind == TN_STR && !quote) return tn_dup(v.p);
     tn_sb b = {0};
     tn_show(&b, v, t, quote);
     tn_str *s = tn_str_from(b.p ? b.p : "", b.len);
@@ -510,10 +718,12 @@ static int64_t tn_parse_int(tn_str *s, tn_loc at) {
 
 /* ---- effects ---- */
 
+/* Takes ownership of the parts. */
 static tn_unit tn_print(int n, tn_str **parts) {
     for (int i = 0; i < n; i++) {
         if (i) fputc(' ', stdout);
         fwrite(parts[i]->data, 1, parts[i]->len, stdout);
+        tn_drop(parts[i]);
     }
     fputc('\n', stdout);
     return 0;

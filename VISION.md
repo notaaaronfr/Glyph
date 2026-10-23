@@ -43,7 +43,7 @@ A human reviewer doesn't need to read 500 lines. They read the signatures, which
 
 ## Where we're going
 
-**Near term: the language.** Memory management for native code (reference counting with in-place reuse: no garbage-collector pauses, and no cycles to leak, because Glyph values are immutable), modules, a faster interpreter, editor support (LSP), and a package manager.
+**Near term: the language.** Modules, deeper memory optimizations (reusing matched values, borrowed parameters; v0.7 already frees everything with no garbage collector and updates in place), a faster interpreter, editor support (LSP), and a package manager.
 
 **AI in the toolchain.**
 - `glyph fix` (shipped in v0.3): an AI repair loop. A proposed fix is accepted only if it type-checks, adds no new effects, keeps every contract and test unchanged, and passes.

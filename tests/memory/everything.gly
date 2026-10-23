@@ -1,0 +1,116 @@
+# Exercises every kind of heap value and every ownership path, and exits normally,
+# so the memory tests can check that nothing leaks and nothing is freed twice.
+
+type Point { x: Int, y: Int }
+type Line { from: Point, to: Point, label: Str }
+type Box[T] { item: T }
+
+enum Shape {
+  Circle { center: Point, radius: Int }
+  Poly { points: List[Point], name: Str }
+  Empty
+}
+
+enum Tree[T] {
+  Leaf
+  Node { left: Tree[T], value: T, right: Tree[T] }
+}
+
+fn first_long(words: List[Str], n: Int) -> Option[Str] {
+  for w in words {
+    if len(w) >= n {
+      return Some { value: w }
+    }
+  }
+  return None
+}
+
+fn describe(s: Shape) -> Str {
+  match s {
+    Circle { center, radius } => { return "circle " + str(center) + " r" + str(radius) }
+    Poly { points, name } => {
+      if len(points) == 0 {
+        return name + " (empty)"
+      }
+      return name + " with " + str(len(points)) + " points"
+    }
+    Empty => { return "nothing" }
+  }
+}
+
+fn grow(xs: List[Str], word: Str) -> List[Str]
+  ensures len(result) == len(xs) + 1
+{
+  xs = push(xs, word)
+  return xs
+}
+
+fn insert(t: Tree[Str], v: Str) -> Tree[Str] {
+  match t {
+    Leaf => { return Node { left: Leaf, value: v, right: Leaf } }
+    Node { left, value, right } => {
+      if v < value {
+        return Node { left: insert(left, v), value: value, right: right }
+      }
+      return Node { left: left, value: value, right: insert(right, v) }
+    }
+  }
+}
+
+fn count[T](t: Tree[T]) -> Int {
+  match t {
+    Leaf => { return 0 }
+    Node { left, right } => { return count(left) + 1 + count(right) }
+  }
+}
+
+fn keep(p: Point) -> Point {
+  return p
+}
+
+fn main() uses io {
+  let words = split("alpha,beta,gamma,delta", ",")
+  let w = words
+  words = grow(words, "epsilon")
+  words = words + ["zeta"]
+  print(w, words, join(words, "|"))
+  print(first_long(words, 6), first_long(words, 50))
+
+  let line = Line { from: Point { x: 1, y: 2 }, to: Point { x: 3, y: 4 }, label: "a" }
+  let copy = line
+  line.to.y = 40
+  line.label = line.label + "b"
+  line.from = keep(line.to)
+  print(line, copy, line == copy)
+
+  let shapes = [Circle { center: Point { x: 0, y: 0 }, radius: 2 }, Poly { points: [Point { x: 1, y: 1 }], name: "tri" }, Poly { points: [], name: "none" }, Empty]
+  for s in shapes {
+    print(describe(s))
+  }
+  print(contains(shapes, Empty), shapes[1])
+
+  let t: Tree[Str] = Leaf
+  for word in words {
+    t = insert(t, word)
+  }
+  print("tree has", count(t), "words")
+
+  let b = Box { item: [Some { value: "x" }, None] }
+  let b2 = b
+  b.item = push(b.item, Some { value: "y" })
+  print(b, b2)
+
+  let s = ""
+  for c in "héllo" {
+    s = c + s
+  }
+  let s = s + "!"
+  print(s, s[1], len(s))
+
+  let i = 0
+  while i < 3 and len(words) > 0 {
+    words = push(words, str(i))
+    i = i + 1
+  }
+  print(len(words), words[len(words) - 1])
+}

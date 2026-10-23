@@ -1,0 +1,71 @@
+# Memory benchmark: lots of short-lived values. Run it natively and watch memory:
+#   glyph build examples/memory_bench.gly -o membench && /usr/bin/time -l ./membench
+
+type Point { x: Int, y: Int }
+
+enum Tree {
+  Leaf
+  Node { left: Tree, value: Int, right: Tree }
+}
+
+fn squares(n: Int) -> List[Int] {
+  let xs: List[Int] = []
+  for i in range(n) {
+    xs = push(xs, i * i)
+  }
+  return xs
+}
+
+fn insert(t: Tree, v: Int) -> Tree {
+  match t {
+    Leaf => { return Node { left: Leaf, value: v, right: Leaf } }
+    Node { left, value, right } => {
+      if v < value {
+        return Node { left: insert(left, v), value: value, right: right }
+      }
+      return Node { left: left, value: value, right: insert(right, v) }
+    }
+  }
+}
+
+fn size(t: Tree) -> Int {
+  match t {
+    Leaf => { return 0 }
+    Node { left, right } => { return size(left) + 1 + size(right) }
+  }
+}
+
+fn main() uses io {
+  # 1. Many temporary lists: 2,000 lists of 1,000 items, each dropped right away.
+  let total = 0
+  for round in range(2000) {
+    let xs = squares(1000)
+    total = total + xs[999]
+  }
+  print("lists:", total)
+
+  # 2. A record updated 3 million times.
+  let p = Point { x: 0, y: 0 }
+  for i in range(3000000) {
+    p.x = p.x + 1
+    p.y = p.y + 2
+  }
+  print("record:", p)
+
+  # 3. Strings built and thrown away.
+  let chars = 0
+  for i in range(200000) {
+    let s = "item-" + str(i) + "-" + str(i * 2)
+    chars = chars + len(s)
+  }
+  print("strings:", chars)
+
+  # 4. A search tree rebuilt by inserting 20,000 values.
+  let t = Leaf
+  let v = 7
+  for i in range(20000) {
+    v = (v * 1103515245 + 12345) % 2147483648
+    t = insert(t, v)
+  }
+  print("tree size:", size(t))
+}
