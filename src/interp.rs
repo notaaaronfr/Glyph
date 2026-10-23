@@ -161,8 +161,10 @@ fn has_type(v: &Value, t: &Type) -> bool {
         // Element types are guaranteed by the static checker; re-checking them here
         // would make every call that passes a list O(n).
         (Type::List(_), Value::List(_)) => true,
-        (Type::Record(n), Value::Record(r)) => *n == r.name,
-        (Type::Enum(n), Value::Enum(e)) => *n == e.enum_name,
+        (Type::Record(n, _), Value::Record(r)) => *n == r.name,
+        (Type::Enum(n, _), Value::Enum(e)) => *n == e.enum_name,
+        // Generic code is checked statically; any value can stand for `T` at runtime.
+        (Type::Param(_), _) => true,
         _ => false,
     }
 }

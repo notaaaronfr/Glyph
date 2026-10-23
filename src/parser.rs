@@ -10,12 +10,31 @@ const KEYWORDS: [&str; 21] = [
 
 const BUILTIN_TYPES: [&str; 6] = ["Int", "Str", "Bool", "Unit", "Any", "List"];
 
+/// Declarations available in every program.
+const PRELUDE: &str = "
+enum Option[T] {
+  Some { value: T }
+  None
+}
+
+enum Result[T, E] {
+  Ok { value: T }
+  Err { error: E }
+}
+";
+
 pub fn parse(src: &str) -> Result<Program, Error> {
-    let toks = lex(src)?;
+    // Prelude positions are line 0, which marks them as built in.
+    let mut prelude_toks = lex(PRELUDE).expect("the prelude lexes");
+    for t in &mut prelude_toks {
+        t.pos = Pos { line: 0, col: 0 };
+    }
+    let user_toks = lex(src)?;
+    let all: Vec<Token> = prelude_toks.iter().chain(&user_toks).cloned().collect();
     // Record types may be used before they are declared, and `Name {` is only a record
     // literal when `Name` is a declared type, so collect the type names up front.
     let names_after = |kw: &str| -> HashSet<String> {
-        toks.windows(2)
+        all.windows(2)
             .filter(|w| w[0].tok == Tok::Ident(kw.into()))
             .filter_map(|w| match &w[1].tok {
                 Tok::Ident(n) => Some(n.clone()),
@@ -25,21 +44,36 @@ pub fn parse(src: &str) -> Result<Program, Error> {
     };
     let type_names = names_after("type");
     let enum_names = names_after("enum");
-    let (variant_names, variants_with_fields) = scan_variants(&toks);
+    let (variant_names, variants_with_fields) = scan_variants(&all);
+    let mut prog = Program {
+        types: vec![],
+        enums: vec![],
+        funcs: vec![],
+        tests: vec![],
+    };
+    let mut prelude = Parser {
+        toks: prelude_toks,
+        i: 0,
+        src: PRELUDE,
+        type_names: type_names.clone(),
+        enum_names: enum_names.clone(),
+        variant_names: variant_names.clone(),
+        variants_with_fields: variants_with_fields.clone(),
+        tparams: vec![],
+    };
+    while prelude.is_kw("enum") {
+        prog.enums
+            .push(prelude.enum_decl().expect("the prelude parses"));
+    }
     let mut p = Parser {
-        toks,
+        toks: user_toks,
         i: 0,
         src,
         type_names,
         enum_names,
         variant_names,
         variants_with_fields,
-    };
-    let mut prog = Program {
-        types: vec![],
-        enums: vec![],
-        funcs: vec![],
-        tests: vec![],
+        tparams: vec![],
     };
     loop {
         if matches!(p.peek(), Tok::Eof) {
@@ -69,11 +103,15 @@ fn scan_variants(toks: &[Token]) -> (HashSet<String>, HashSet<String>) {
     let (mut names, mut with_fields) = (HashSet::new(), HashSet::new());
     let mut i = 0;
     while i + 2 < toks.len() {
-        if toks[i].tok != Tok::Ident("enum".into()) || toks[i + 2].tok != Tok::Sym("{") {
+        if toks[i].tok != Tok::Ident("enum".into()) {
             i += 1;
             continue;
         }
-        i += 3;
+        // Skip the name and any type parameters, up to the body's `{`.
+        while i < toks.len() && toks[i].tok != Tok::Sym("{") {
+            i += 1;
+        }
+        i += 1;
         let mut depth = 1;
         while i < toks.len() && depth > 0 {
             match &toks[i].tok {
@@ -102,6 +140,8 @@ struct Parser<'a> {
     enum_names: HashSet<String>,
     variant_names: HashSet<String>,
     variants_with_fields: HashSet<String>,
+    /// Type parameters in scope while parsing a generic declaration or function.
+    tparams: Vec<String>,
 }
 
 fn bx(e: Expr) -> Box<Expr> {
@@ -190,6 +230,8 @@ impl<'a> Parser<'a> {
         let pos = self.pos();
         self.bump();
         let (name, _) = self.ident()?;
+        let tparams = self.type_params()?;
+        self.tparams = tparams.clone();
         self.expect_sym("(")?;
         let mut params = vec![];
         while !self.is_sym(")") {
@@ -232,8 +274,10 @@ impl<'a> Parser<'a> {
             return Err(self.err("`uses` must come before `requires` / `ensures`"));
         }
         let body = self.block()?;
+        self.tparams.clear();
         Ok(Func {
             name,
+            tparams,
             params,
             ret,
             effects,
@@ -292,14 +336,24 @@ impl<'a> Parser<'a> {
         let pos = self.pos();
         self.bump();
         let (name, _) = self.type_name("type")?;
+        let params = self.type_params()?;
+        self.tparams = params.clone();
         let fields = self.field_decls()?;
-        Ok(TypeDecl { name, fields, pos })
+        self.tparams.clear();
+        Ok(TypeDecl {
+            name,
+            params,
+            fields,
+            pos,
+        })
     }
 
     fn enum_decl(&mut self) -> Result<EnumDecl, Error> {
         let pos = self.pos();
         self.bump();
         let (name, _) = self.type_name("enum")?;
+        let params = self.type_params()?;
+        self.tparams = params.clone();
         self.expect_sym("{")?;
         let mut variants = vec![];
         while !self.is_sym("}") {
@@ -317,6 +371,7 @@ impl<'a> Parser<'a> {
             self.eat_sym(",");
         }
         self.bump();
+        self.tparams.clear();
         if variants.is_empty() {
             return Err(Error::new(
                 "syntax",
@@ -326,6 +381,7 @@ impl<'a> Parser<'a> {
         }
         Ok(EnumDecl {
             name,
+            params,
             variants,
             pos,
         })
@@ -405,6 +461,44 @@ impl<'a> Parser<'a> {
         Ok(v)
     }
 
+    /// Optional `[T, U]` after a declaration's name.
+    fn type_params(&mut self) -> Result<Vec<String>, Error> {
+        let mut params = vec![];
+        if self.eat_sym("[") {
+            while !self.is_sym("]") {
+                let (p, ppos) = self.type_name("type parameter")?;
+                if params.contains(&p) {
+                    return Err(Error::new(
+                        "syntax",
+                        ppos,
+                        format!("type parameter `{}` appears twice", p),
+                    ));
+                }
+                params.push(p);
+                if !self.eat_sym(",") {
+                    break;
+                }
+            }
+            self.expect_sym("]")?;
+        }
+        Ok(params)
+    }
+
+    /// Optional `[Int, Str]` after a generic type's name.
+    fn type_args(&mut self) -> Result<Vec<Type>, Error> {
+        let mut args = vec![];
+        if self.eat_sym("[") {
+            while !self.is_sym("]") {
+                args.push(self.ty()?);
+                if !self.eat_sym(",") {
+                    break;
+                }
+            }
+            self.expect_sym("]")?;
+        }
+        Ok(args)
+    }
+
     fn ty(&mut self) -> Result<Type, Error> {
         let (n, pos) = self.ident()?;
         Ok(match n.as_str() {
@@ -422,8 +516,9 @@ impl<'a> Parser<'a> {
                     Type::List(Box::new(Type::Any))
                 }
             }
-            _ if self.type_names.contains(&n) => Type::Record(n),
-            _ if self.enum_names.contains(&n) => Type::Enum(n),
+            _ if self.tparams.contains(&n) => Type::Param(n),
+            _ if self.type_names.contains(&n) => Type::Record(n, self.type_args()?),
+            _ if self.enum_names.contains(&n) => Type::Enum(n, self.type_args()?),
             _ => {
                 return Err(
                     Error::new("syntax", pos, format!("unknown type `{}`", n)).hint(

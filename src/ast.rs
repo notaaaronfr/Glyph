@@ -1,4 +1,5 @@
 use crate::error::Pos;
+use std::collections::HashMap;
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -9,10 +10,34 @@ pub enum Type {
     Unit,
     Any,
     List(Box<Type>),
-    /// A user-defined record type, by name.
-    Record(String),
-    /// A user-defined enum type, by name.
-    Enum(String),
+    /// A user-defined record type with its type arguments: `Pair[Int, Str]`.
+    Record(String, Vec<Type>),
+    /// A user-defined enum type with its type arguments: `Option[Int]`.
+    Enum(String, Vec<Type>),
+    /// A type parameter of a generic declaration or function: `T`.
+    Param(String),
+}
+
+impl Type {
+    /// Replaces type parameters that `bindings` knows; others stay as they are.
+    pub fn subst(&self, bindings: &HashMap<String, Type>) -> Type {
+        match self {
+            Type::Param(p) => bindings.get(p).cloned().unwrap_or_else(|| self.clone()),
+            Type::List(x) => Type::List(Box::new(x.subst(bindings))),
+            Type::Record(n, args) => {
+                Type::Record(n.clone(), args.iter().map(|a| a.subst(bindings)).collect())
+            }
+            Type::Enum(n, args) => {
+                Type::Enum(n.clone(), args.iter().map(|a| a.subst(bindings)).collect())
+            }
+            _ => self.clone(),
+        }
+    }
+}
+
+/// `params[i] -> args[i]`, for substituting a generic declaration's type parameters.
+pub fn bindings(params: &[String], args: &[Type]) -> HashMap<String, Type> {
+    params.iter().cloned().zip(args.iter().cloned()).collect()
 }
 
 impl fmt::Display for Type {
@@ -24,7 +49,12 @@ impl fmt::Display for Type {
             Type::Unit => write!(f, "Unit"),
             Type::Any => write!(f, "Any"),
             Type::List(t) => write!(f, "List[{}]", t),
-            Type::Record(n) | Type::Enum(n) => write!(f, "{}", n),
+            Type::Record(n, args) | Type::Enum(n, args) if args.is_empty() => write!(f, "{}", n),
+            Type::Record(n, args) | Type::Enum(n, args) => {
+                let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+                write!(f, "{}[{}]", n, args.join(", "))
+            }
+            Type::Param(p) => write!(f, "{}", p),
         }
     }
 }
@@ -138,6 +168,8 @@ pub struct Param {
 #[derive(Debug, Clone)]
 pub struct Func {
     pub name: String,
+    /// Type parameters: `fn first[T](xs: List[T]) -> Option[T]`.
+    pub tparams: Vec<String>,
     pub params: Vec<Param>,
     pub ret: Type,
     pub effects: Vec<(String, Pos)>,
@@ -159,6 +191,7 @@ pub struct Test {
 #[derive(Debug, Clone)]
 pub struct TypeDecl {
     pub name: String,
+    pub params: Vec<String>,
     pub fields: Vec<(String, Type, Pos)>,
     pub pos: Pos,
 }
@@ -191,6 +224,7 @@ impl VariantDecl {
 #[derive(Debug, Clone)]
 pub struct EnumDecl {
     pub name: String,
+    pub params: Vec<String>,
     pub variants: Vec<VariantDecl>,
     pub pos: Pos,
 }

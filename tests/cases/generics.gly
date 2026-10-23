@@ -1,0 +1,117 @@
+# Generics: generic records and enums, the built-in Option and Result,
+# generic functions used at several types, inference from context, contracts.
+
+type Pair[A, B] {
+  first: A
+  second: B
+}
+
+type Point { x: Int, y: Int }
+
+enum Tree[T] {
+  Leaf
+  Node { left: Tree[T], value: T, right: Tree[T] }
+}
+
+fn first[T](xs: List[T]) -> Option[T] {
+  if len(xs) == 0 {
+    return None
+  }
+  return Some { value: xs[0] }
+}
+
+fn unwrap_or[T](o: Option[T], default: T) -> T {
+  match o {
+    Some { value } => { return value }
+    None => { return default }
+  }
+}
+
+fn index_of[T](xs: List[T], x: T) -> Option[Int] {
+  let i = 0
+  for item in xs {
+    if item == x {
+      return Some { value: i }
+    }
+    i = i + 1
+  }
+  return None
+}
+
+fn swap[A, B](p: Pair[A, B]) -> Pair[B, A]
+  ensures result.first == p.second and result.second == p.first
+{
+  return Pair { first: p.second, second: p.first }
+}
+
+fn repeat[T](x: T, n: Int) -> List[T]
+  requires n >= 0
+  ensures len(result) == n
+{
+  let out: List[T] = []
+  for i in range(n) {
+    out = push(out, x)
+  }
+  return out
+}
+
+fn size[T](t: Tree[T]) -> Int {
+  match t {
+    Leaf => { return 0 }
+    Node { left, right } => { return size(left) + 1 + size(right) }
+  }
+}
+
+fn describe[T](t: Tree[T]) -> Str {
+  match t {
+    Leaf => { return "." }
+    Node { left, value, right } => { return "(" + describe(left) + " " + str(value) + " " + describe(right) + ")" }
+  }
+}
+
+fn insert(t: Tree[Int], v: Int) -> Tree[Int] {
+  match t {
+    Leaf => { return Node { left: Leaf, value: v, right: Leaf } }
+    Node { left, value, right } => {
+      if v < value {
+        return Node { left: insert(left, v), value: value, right: right }
+      }
+      return Node { left: left, value: value, right: insert(right, v) }
+    }
+  }
+}
+
+fn safe_div(a: Int, b: Int) -> Result[Int, Str] {
+  if b == 0 {
+    return Err { error: "division by zero" }
+  }
+  return Ok { value: a / b }
+}
+
+fn main() uses io {
+  print(first([10, 20]), first(["a"]), first([Point { x: 1, y: 2 }]))
+  let none: Option[Int] = first([])
+  print(none, unwrap_or(none, -1), unwrap_or(first([7]), -1))
+  print(unwrap_or(None, "fallback"), unwrap_or(Some { value: [1, 2] }, []))
+
+  print(index_of(["x", "y", "z"], "z"), index_of([[1], [2]], [3]))
+
+  let p = Pair { first: 1, second: "one" }
+  print(p, swap(p), swap(swap(p)) == p)
+  print(repeat("ab", 3), repeat(Pair { first: true, second: 0 }, 2))
+
+  let t: Tree[Int] = Leaf
+  for v in [5, 2, 8, 1, 9] {
+    t = insert(t, v)
+  }
+  print(describe(t), "size", size(t))
+  print(size(Node { left: Leaf, value: "solo", right: Leaf }))
+
+  for b in [2, 0] {
+    match safe_div(10, b) {
+      Ok { value } => { print("10 /", b, "=", value) }
+      Err { error } => { print("10 /", b, "failed:", error) }
+    }
+  }
+  print(repeat(0, -1))
+}

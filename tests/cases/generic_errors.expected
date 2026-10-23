@@ -1,0 +1,26 @@
+exit: 1
+--- stdout ---
+--- stderr ---
+tests/cases/generic_errors.gly:9:10: type error: cannot apply `+` to T and Int
+9 |   return x + 1
+  |          ^
+tests/cases/generic_errors.gly:18:16: type error: `Box` needs 1 type argument(s), like `Box[T]`
+18 |   let a: Box = Box { item: 1 }
+   |                ^
+tests/cases/generic_errors.gly:19:29: type error: `Option` needs 1 type argument(s), like `Option[T]`
+19 |   let b: Option[Int, Str] = None
+   |                             ^
+tests/cases/generic_errors.gly:20:17: type error: argument `b` of `same` must be Int, found Str
+20 |   print(same(1, "two"))
+   |                 ^
+tests/cases/generic_errors.gly:21:9: type error: cannot tell what `T` is in this `None`
+21 |   print(None)
+   |         ^
+  hint: give it a type annotation, e.g. `let x: Option[...] = ...`
+tests/cases/generic_errors.gly:22:9: type error: cannot tell what `T` is in this call to `make`
+22 |   print(make())
+   |         ^
+  hint: give the result a type annotation, e.g. `let x: List[T] = make(...)`
+tests/cases/generic_errors.gly:23:33: type error: field `item` of `Box` must be Int, found Str
+23 |   let c: Box[Int] = Box { item: "x" }
+   |                                 ^

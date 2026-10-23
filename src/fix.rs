@@ -458,6 +458,10 @@ values: this updates only `p`), structural `==`.
 - Enums: `enum Shape { Circle { radius: Int }, Empty }` (variants separated by commas or newlines); \
 values `Circle { radius: 2 }`, `Empty`. Read them with `match s { Circle { radius } => { ... } Empty => { ... } }`; \
 `match` must cover every variant or end with `_ => { ... }`; `Circle { radius: r }` binds `r`.
+- Generics: `type Pair[A, B] { ... }`, `enum Tree[T] { ... }`, `fn first[T](xs: List[T]) -> Option[T]`; \
+type arguments are inferred. Built in: `enum Option[T] { Some { value: T }, None }` and \
+`enum Result[T, E] { Ok { value: T }, Err { error: E } }`. Inside generic code, values of type `T` \
+support only `==`, `!=`, printing and storing.
 - Tests: `test \"name\" { assert ... }`.
 
 Glyph verifies every fix you propose and rejects it if it adds an effect the original did \

@@ -1,0 +1,24 @@
+# Generic mistakes, all caught before the program runs.
+type Box[T] { item: T }
+
+fn same[T](a: T, b: T) -> T {
+  return a
+}
+
+fn add_one[T](x: T) -> T {
+  return x + 1
+}
+
+fn make[T]() -> List[T] {
+  let xs: List[T] = []
+  return xs
+}
+
+fn main() uses io {
+  let a: Box = Box { item: 1 }
+  let b: Option[Int, Str] = None
+  print(same(1, "two"))
+  print(None)
+  print(make())
+  let c: Box[Int] = Box { item: "x" }
+}

@@ -33,21 +33,76 @@ pub fn builtin(name: &str) -> Option<(usize, Option<usize>, Option<&'static str>
 
 /// The static type of every expression, keyed by node address. The program must
 /// not move between `check` and the consumer (the native compiler).
-pub struct Types(HashMap<*const Expr, Type>);
+pub struct Types {
+    types: HashMap<*const Expr, Type>,
+    /// The type arguments chosen at each call of a generic function.
+    targs: HashMap<*const Expr, Vec<Type>>,
+}
 
 impl Types {
     pub fn of(&self, e: &Expr) -> &Type {
-        self.0.get(&(e as *const Expr)).unwrap_or(&Type::Any)
+        self.types.get(&(e as *const Expr)).unwrap_or(&Type::Any)
+    }
+
+    pub fn targs(&self, e: &Expr) -> &[Type] {
+        self.targs
+            .get(&(e as *const Expr))
+            .map_or(&[], |v| v.as_slice())
     }
 }
 
-/// `Any` is compatible with everything; lists are compatible element-wise.
+/// `Any` is compatible with everything; lists and generic types are compatible
+/// argument by argument.
 pub fn compat(a: &Type, b: &Type) -> bool {
     match (a, b) {
         (Type::Any, _) | (_, Type::Any) => true,
         (Type::List(x), Type::List(y)) => compat(x, y),
+        (Type::Record(n, xs), Type::Record(m, ys)) | (Type::Enum(n, xs), Type::Enum(m, ys)) => {
+            n == m && xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| compat(x, y))
+        }
         _ => a == b,
     }
+}
+
+fn has_any(t: &Type) -> bool {
+    match t {
+        Type::Any => true,
+        Type::List(x) => has_any(x),
+        Type::Record(_, xs) | Type::Enum(_, xs) => xs.iter().any(has_any),
+        _ => false,
+    }
+}
+
+/// Matches `pat`, which may mention the type parameters `params`, against `actual`,
+/// recording what each parameter must be. Returns false on a mismatch.
+fn bind(pat: &Type, actual: &Type, params: &[String], b: &mut HashMap<String, Type>) -> bool {
+    match (pat, actual) {
+        (_, Type::Any) | (Type::Any, _) => true,
+        (Type::Param(p), _) if params.contains(p) => match b.get(p) {
+            Some(known) if !has_any(known) || has_any(actual) => compat(known, actual),
+            Some(known) if !compat(known, actual) => false,
+            // Unknown, or known only partly (like `List[Any]` from `[]`): learn more.
+            _ => {
+                b.insert(p.clone(), actual.clone());
+                true
+            }
+        },
+        (Type::List(x), Type::List(y)) => bind(x, y, params, b),
+        (Type::Record(n, xs), Type::Record(m, ys)) | (Type::Enum(n, xs), Type::Enum(m, ys)) => {
+            n == m && xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| bind(x, y, params, b))
+        }
+        _ => pat == actual,
+    }
+}
+
+/// `t` with what is known substituted, and still-unknown `params` replaced by `Any`.
+fn hint(t: &Type, b: &HashMap<String, Type>, params: &[String]) -> Type {
+    let unknown: HashMap<String, Type> = params
+        .iter()
+        .filter(|p| !b.contains_key(*p))
+        .map(|p| (p.clone(), Type::Any))
+        .collect();
+    t.subst(b).subst(&unknown)
 }
 
 fn is(t: &Type, want: &Type) -> bool {
@@ -64,6 +119,7 @@ pub fn check(p: &Program) -> Result<Types, Vec<Error>> {
         in_fn: false,
         ret: Type::Unit,
         types: HashMap::new(),
+        targs: HashMap::new(),
         records: HashMap::new(),
         prog: p,
     };
@@ -80,12 +136,19 @@ pub fn check(p: &Program) -> Result<Types, Vec<Error>> {
                 .flat_map(|e| e.variants.iter().map(|v| (&v.name, v.pos))),
         );
     for (n, pos) in all_names {
-        if names.insert(n, pos).is_some() {
-            c.err(
+        if let Some(first) = names.insert(n, pos) {
+            let mut e = Error::new(
                 "name",
                 pos,
                 format!("the name `{}` is defined more than once", n),
             );
+            if first.line == 0 {
+                e = e.hint(format!(
+                    "`{}` is built in (from `Option` or `Result`); choose another name",
+                    n
+                ));
+            }
+            c.errors.push(e);
         }
     }
     for v in p.enums.iter().flat_map(|e| &e.variants) {
@@ -131,7 +194,22 @@ pub fn check(p: &Program) -> Result<Types, Vec<Error>> {
             ));
         }
     }
+    let decl_fields = p.types.iter().flat_map(|t| &t.fields).chain(
+        p.enums
+            .iter()
+            .flat_map(|e| &e.variants)
+            .flat_map(|v| &v.fields),
+    );
+    for (_, ft, pos) in decl_fields {
+        c.check_type(ft, *pos);
+    }
     for f in &p.funcs {
+        for t in f.params.iter().map(|p| &p.ty).chain([&f.ret]) {
+            c.check_type(t, f.pos);
+        }
+        if f.name == "main" && !f.tparams.is_empty() {
+            c.err("type", f.pos, "`main` can't have type parameters".into());
+        }
         c.func(f);
     }
     for t in &p.tests {
@@ -144,7 +222,10 @@ pub fn check(p: &Program) -> Result<Types, Vec<Error>> {
         c.block(&t.body);
     }
     if c.errors.is_empty() {
-        Ok(Types(c.types))
+        Ok(Types {
+            types: c.types,
+            targs: c.targs,
+        })
     } else {
         Err(c.errors)
     }
@@ -170,6 +251,7 @@ struct Checker<'a> {
     in_fn: bool,
     ret: Type,
     types: HashMap<*const Expr, Type>,
+    targs: HashMap<*const Expr, Vec<Type>>,
     records: HashMap<&'a str, &'a TypeDecl>,
     prog: &'a Program,
 }
@@ -177,6 +259,56 @@ struct Checker<'a> {
 impl<'a> Checker<'a> {
     fn err(&mut self, kind: &'static str, pos: Pos, msg: String) {
         self.errors.push(Error::new(kind, pos, msg));
+    }
+
+    /// The type parameters of the record or enum called `name`, if it exists.
+    fn decl_params(&self, name: &str) -> Option<&'a [String]> {
+        let prog = self.prog;
+        prog.types
+            .iter()
+            .find(|t| t.name == name)
+            .map(|t| t.params.as_slice())
+            .or_else(|| {
+                prog.enums
+                    .iter()
+                    .find(|e| e.name == name)
+                    .map(|e| e.params.as_slice())
+            })
+    }
+
+    /// Reports generic types written with the wrong number of type arguments.
+    /// Returns false if there was a problem.
+    fn check_type(&mut self, t: &Type, pos: Pos) -> bool {
+        let before = self.errors.len();
+        self.check_type_inner(t, pos);
+        self.errors.len() == before
+    }
+
+    fn check_type_inner(&mut self, t: &Type, pos: Pos) {
+        match t {
+            Type::List(x) => self.check_type_inner(x, pos),
+            Type::Record(n, args) | Type::Enum(n, args) => {
+                let params = self.decl_params(n).unwrap_or(&[]);
+                if args.len() != params.len() {
+                    let msg = if params.is_empty() {
+                        format!("`{}` takes no type arguments", n)
+                    } else {
+                        format!(
+                            "`{}` needs {} type argument(s), like `{}[{}]`",
+                            n,
+                            params.len(),
+                            n,
+                            params.join(", ")
+                        )
+                    };
+                    self.err("type", pos, msg);
+                }
+                for a in args {
+                    self.check_type_inner(a, pos);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn validate_effects(&mut self, effects: &[(String, Pos)]) {
@@ -274,9 +406,14 @@ impl<'a> Checker<'a> {
         match s {
             Stmt::Let(n, ann, e) => {
                 let t = match ann {
-                    Some(a) => {
+                    Some(a) if self.check_type(a, e.pos) => {
                         self.expect(e, a, &format!("the value of `{}`", n));
                         a.clone()
+                    }
+                    // A malformed annotation was already reported; don't pile on.
+                    Some(_) => {
+                        self.expr(e, Some(&Type::Any));
+                        Type::Any
                     }
                     None => self.expr(e, None),
                 };
@@ -464,31 +601,106 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            ExprKind::Call(name, args) => self.call(name, args, e.pos),
+            ExprKind::Call(name, args) => self.call(name, args, e, expected),
             ExprKind::Field(target, f) => {
                 let t = self.expr(target, None);
                 self.field_type(&t, f, e.pos)
             }
             ExprKind::Record(name, fields) => {
-                if let Some(decl) = self.records.get(name.as_str()).copied() {
-                    self.field_values(name, &decl.fields, fields, e.pos);
-                }
-                Record(name.clone())
+                let Some(decl) = self.records.get(name.as_str()).copied() else {
+                    return Any;
+                };
+                let args = self.construct(
+                    name,
+                    name,
+                    &decl.params,
+                    &decl.fields,
+                    fields,
+                    expected,
+                    e.pos,
+                );
+                Record(name.clone(), args)
             }
             ExprKind::Variant(name, fields) => {
                 let Some((decl, i)) = self.prog.variant(name) else {
                     return Any;
                 };
-                self.field_values(name, &decl.variants[i].fields, fields, e.pos);
-                Enum(decl.name.clone())
+                let args = self.construct(
+                    name,
+                    &decl.name,
+                    &decl.params,
+                    &decl.variants[i].fields,
+                    fields,
+                    expected,
+                    e.pos,
+                );
+                Enum(decl.name.clone(), args)
             }
         }
     }
 
-    /// Checks the fields given in a record or variant value against its declaration.
+    /// Checks a record or variant value against its (possibly generic) declaration
+    /// `owner`, and works out the type arguments: from the expected type, as in
+    /// `let x: Option[Int] = None`, and from the field values.
+    #[allow(clippy::too_many_arguments)]
+    fn construct(
+        &mut self,
+        name: &str,
+        owner: &str,
+        params: &[String],
+        decl: &'a [(String, Type, Pos)],
+        given: &'a [(String, Expr, Pos)],
+        expected: Option<&Type>,
+        pos: Pos,
+    ) -> Vec<Type> {
+        let mut b = HashMap::new();
+        if let Some(Type::Record(n, args) | Type::Enum(n, args)) = expected {
+            if n == owner && args.len() == params.len() {
+                for (p, a) in params.iter().zip(args) {
+                    if !has_any(a) {
+                        b.insert(p.clone(), a.clone());
+                    }
+                }
+            }
+        }
+        self.field_values(name, params, &mut b, decl, given, pos);
+        // As an argument to a generic call (`unwrap_or(None, 5)`), the call itself
+        // works out what is still unknown here.
+        let context_decides = match expected {
+            Some(Type::Record(n, _) | Type::Enum(n, _)) => n == owner,
+            Some(Type::Any) => true,
+            _ => false,
+        };
+        params
+            .iter()
+            .map(|p| match b.get(p) {
+                Some(t) => t.clone(),
+                None if context_decides => Type::Any,
+                None => {
+                    self.errors.push(
+                        Error::new(
+                            "type",
+                            pos,
+                            format!("cannot tell what `{}` is in this `{}`", p, name),
+                        )
+                        .hint(format!(
+                            "give it a type annotation, e.g. `let x: {}[...] = ...`",
+                            owner
+                        )),
+                    );
+                    Type::Any
+                }
+            })
+            .collect()
+    }
+
+    /// Checks the fields given in a record or variant value against its declaration,
+    /// learning type parameters into `b` as it goes.
     fn field_values(
         &mut self,
         name: &str,
+        params: &[String],
+        b: &mut HashMap<String, Type>,
         decl: &'a [(String, Type, Pos)],
         given: &'a [(String, Expr, Pos)],
         pos: Pos,
@@ -500,7 +712,21 @@ impl<'a> Checker<'a> {
             }
             match decl.iter().find(|d| d.0 == *f) {
                 Some((_, ft, _)) => {
-                    self.expect(fe, ft, &format!("field `{}` of `{}`", f, name));
+                    let want = hint(ft, b, params);
+                    let actual = self.expr(fe, Some(&want));
+                    if !bind(ft, &actual, params, b) {
+                        self.err(
+                            "type",
+                            fe.pos,
+                            format!(
+                                "field `{}` of `{}` must be {}, found {}",
+                                f,
+                                name,
+                                hint(ft, b, params),
+                                actual
+                            ),
+                        );
+                    }
                 }
                 None => {
                     self.expr(fe, None);
@@ -536,8 +762,15 @@ impl<'a> Checker<'a> {
 
     fn match_stmt(&mut self, scrutinee: &'a Expr, arms: &'a [Arm], pos: Pos) {
         let t = self.expr(scrutinee, None);
+        let mut targs = HashMap::new();
         let decl = match &t {
-            Type::Enum(n) => self.prog.enums.iter().find(|e| &e.name == n),
+            Type::Enum(n, args) => {
+                let d = self.prog.enums.iter().find(|e| &e.name == n);
+                if let Some(d) = d {
+                    targs = bindings(&d.params, args);
+                }
+                d
+            }
             Type::Any => None,
             other => {
                 self.err(
@@ -591,7 +824,7 @@ impl<'a> Checker<'a> {
                             for (f, name, fpos) in binds {
                                 match var.field(f) {
                                     Some((_, ft)) => {
-                                        if scope.insert(name.clone(), ft.clone()).is_some() {
+                                        if scope.insert(name.clone(), ft.subst(&targs)).is_some() {
                                             self.err(
                                                 "name",
                                                 *fpos,
@@ -643,9 +876,9 @@ impl<'a> Checker<'a> {
     fn field_type(&mut self, t: &Type, f: &str, pos: Pos) -> Type {
         match t {
             Type::Any => Type::Any,
-            Type::Record(n) => match self.records.get(n.as_str()).copied() {
+            Type::Record(n, args) => match self.records.get(n.as_str()).copied() {
                 Some(decl) => match decl.field(f) {
-                    Some((_, ft)) => ft.clone(),
+                    Some((_, ft)) => ft.subst(&bindings(&decl.params, args)),
                     None => {
                         self.errors.push(self.no_field(decl, f, pos));
                         Type::Any
@@ -653,7 +886,7 @@ impl<'a> Checker<'a> {
                 },
                 None => Type::Any,
             },
-            Type::Enum(n) => {
+            Type::Enum(n, _) => {
                 self.errors.push(
                     Error::new(
                         "type",
@@ -715,7 +948,8 @@ impl<'a> Checker<'a> {
         })
     }
 
-    fn call(&mut self, name: &str, args: &'a [Expr], pos: Pos) -> Type {
+    fn call(&mut self, name: &str, args: &'a [Expr], e: &'a Expr, expected: Option<&Type>) -> Type {
+        let pos = e.pos;
         let n = args.len();
         if let Some((min, max, effect)) = builtin(name) {
             if let Some(eff) = effect {
@@ -758,12 +992,58 @@ impl<'a> Checker<'a> {
             args.iter().for_each(|a| {
                 self.expr(a, None);
             });
-        } else {
-            for (p, a) in f.params.iter().zip(args) {
-                self.expect(a, &p.ty, &format!("argument `{}` of `{}`", p.name, name));
+            return Type::Any;
+        }
+        // Work out the type parameters: from the expected result type, then from the arguments.
+        let tps = &f.tparams;
+        let mut b = HashMap::new();
+        if let Some(exp) = expected.filter(|_| !tps.is_empty()) {
+            let mut from_expected = HashMap::new();
+            if bind(&f.ret, exp, tps, &mut from_expected) {
+                b = from_expected;
             }
         }
-        f.ret.clone()
+        for (p, a) in f.params.iter().zip(args) {
+            let want = hint(&p.ty, &b, tps);
+            let actual = self.expr(a, Some(&want));
+            if !bind(&p.ty, &actual, tps, &mut b) {
+                self.err(
+                    "type",
+                    a.pos,
+                    format!(
+                        "argument `{}` of `{}` must be {}, found {}",
+                        p.name,
+                        name,
+                        hint(&p.ty, &b, tps),
+                        actual
+                    ),
+                );
+            }
+        }
+        if !tps.is_empty() {
+            let mut targs = vec![];
+            for tp in tps {
+                match b.get(tp) {
+                    Some(t) => targs.push(t.clone()),
+                    None => {
+                        self.errors.push(
+                            Error::new(
+                                "type",
+                                pos,
+                                format!("cannot tell what `{}` is in this call to `{}`", tp, name),
+                            )
+                            .hint(format!(
+                                "give the result a type annotation, e.g. `let x: {} = {}(...)`",
+                                f.ret, name
+                            )),
+                        );
+                        targs.push(Type::Any);
+                    }
+                }
+            }
+            self.targs.insert(e as *const Expr, targs);
+        }
+        hint(&f.ret, &b, tps)
     }
 
     /// Argument counts are already validated.

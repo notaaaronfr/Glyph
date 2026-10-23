@@ -15,7 +15,7 @@ parsed 7
 error: not a digit: x
 circle at 1,1 / something else
 --- stderr ---
-tests/cases/enums.gly:90:9: contract error: precondition of `describe` violated: `s != Empty`
-90 |   print(describe(Empty))
+tests/cases/enums.gly:85:9: contract error: precondition of `describe` violated: `s != Empty`
+85 |   print(describe(Empty))
    |         ^
   hint: called with s = Empty

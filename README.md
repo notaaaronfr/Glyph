@@ -123,14 +123,16 @@ source.gly → lexer → parser → checker (names, types, effects) ─┬→ in
                                                                └→ codegen → C → cc -O2 → executable
 ```
 
-## Language reference (v0.5)
+## Language reference (v0.6)
 
 | Feature | Syntax |
 |---|---|
-| Types | `Int` (64-bit, overflow is an error), `Str`, `Bool`, `Unit`, `List[T]`, records, enums, `Any` (interpreter only) |
+| Types | `Int` (64-bit, overflow is an error), `Str`, `Bool`, `Unit`, `List[T]`, records, enums, generics, `Any` (interpreter only) |
 | Records | `type Point { x: Int, y: Int }`, `Point { x: 1, y: 2 }`, `p.x`, `p.x = 5`, `line.to.y = 3` |
 | Enums | `enum Shape { Circle { radius: Int }, Empty }`, `Circle { radius: 2 }`, `Empty` |
 | Match | `match s { Circle { radius } => { ... } Empty => { ... } }`, `Rect { w: width } => ...`, `_ => ...` |
+| Generics | `type Pair[A, B] { ... }`, `enum Tree[T] { ... }`, `fn first[T](xs: List[T]) -> Option[T]` |
+| Built-in types | `Option[T]` (`Some { value }`, `None`), `Result[T, E]` (`Ok { value }`, `Err { error }`) |
 | Function | `fn name(a: Int) -> Int uses io requires ... ensures ... { ... }` |
 | Variables | `let x = 1`, `let xs: List[Int] = []`, `x = x + 1` |
 | Control flow | `if / else if / else`, `while`, `for x in list_or_string`, `return` |
@@ -185,16 +187,34 @@ shapes.gly:9:3: type error: `match` doesn't handle: Triangle
   hint: add an arm for each, or `_ => { ... }` for the rest
 ```
 
+Records, enums and functions can be generic. Type arguments are inferred, and the native compiler generates a specialised copy of each generic function for every type it's used with, so generic code runs as fast as hand-written code:
+
+```python
+fn first[T](xs: List[T]) -> Option[T] {
+  if len(xs) == 0 { return None }
+  return Some { value: xs[0] }
+}
+
+fn safe_div(a: Int, b: Int) -> Result[Int, Str] {
+  if b == 0 { return Err { error: "division by zero" } }
+  return Ok { value: a / b }
+}
+
+let x: Option[Int] = first([])     # None: the annotation says what `T` is
+print(first(["a", "b"]))           # Some { value: "a" }
+```
+
 ## Status and roadmap
 
-Glyph is **early and experimental**: expect breaking changes. Natively compiled programs don't free memory yet.
+Glyph is **early and experimental**: expect breaking changes. Natively compiled programs don't free memory yet; that's the next milestone.
 
 - [x] Interpreter, static types, effects, contracts, tests, JSON diagnostics
 - [x] Native compiler with identical behaviour
 - [x] Records
 - [x] Enums and exhaustive `match`
-- [ ] Generic types (`Option[T]`, `Result[T, E]`), modules
-- [ ] Memory management for native code
+- [x] Generics, with built-in `Option[T]` and `Result[T, E]`
+- [ ] Memory management for native code: Perceus-style reference counting with in-place reuse
+- [ ] Modules
 - [x] `glyph fix`: AI repair loop. Fixes are accepted only if they type-check, add no effects, keep every contract and test, and pass
 - [ ] `uses ai`: model calls as a typed, declared effect
 - [ ] `glyph build --tune`: learned, meaning-preserving optimization

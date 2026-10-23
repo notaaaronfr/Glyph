@@ -1,0 +1,17 @@
+exit: 1
+--- stdout ---
+Some { value: 10 } Some { value: "a" } Some { value: Point { x: 1, y: 2 } }
+None -1 7
+fallback [1, 2]
+Some { value: 2 } None
+Pair { first: 1, second: "one" } Pair { first: "one", second: 1 } true
+["ab", "ab", "ab"] [Pair { first: true, second: 0 }, Pair { first: true, second: 0 }]
+(((. 1 .) 2 .) 5 (. 8 (. 9 .))) size 5
+1
+10 / 2 = 5
+10 / 0 failed: division by zero
+--- stderr ---
+tests/cases/generics.gly:116:9: contract error: precondition of `repeat` violated: `n >= 0`
+116 |   print(repeat(0, -1))
+    |         ^
+  hint: called with x = 0, n = -1

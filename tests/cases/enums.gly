@@ -15,11 +15,6 @@ enum Expr {
   Mul { left: Expr, right: Expr }
 }
 
-enum Parsed {
-  Ok { value: Int }
-  Failed { message: Str }
-}
-
 fn noisy(n: Int) -> Int uses io {
   print("evaluating", n)
   return n
@@ -41,11 +36,11 @@ fn eval(e: Expr) -> Int {
   }
 }
 
-fn parse_digit(s: Str) -> Parsed {
+fn parse_digit(s: Str) -> Result[Int, Str] {
   if contains("0123456789", s) and len(s) == 1 {
     return Ok { value: int(s) }
   }
-  return Failed { message: "not a digit: " + s }
+  return Err { error: "not a digit: " + s }
 }
 
 fn describe(s: Shape) -> Str
@@ -82,7 +77,7 @@ fn main() uses io {
   for d in ["7", "x"] {
     match parse_digit(d) {
       Ok { value } => { print("parsed", value) }
-      Failed { message } => { print("error:", message) }
+      Err { error } => { print("error:", error) }
     }
   }
 
