@@ -59,7 +59,7 @@ fn fib(n: Int) -> Int
 }
 
 fn main() uses io, time {
-  print("Glyph OS 0.1 - type `help`")
+  print("Glyph OS 0.1 - type help to see the commands")
   let running = true
   while running {
     let line = input("glyph> ")
@@ -79,7 +79,7 @@ fn main() uses io, time {
       }
       Nothing => {}
       Invalid { message } => { print(message) }
-      Unknown { word } => { print("unknown command:", word, "(try `help`)") }
+      Unknown { word } => { print("unknown command:", word, "- type help to see the commands") }
     }
   }
 }
