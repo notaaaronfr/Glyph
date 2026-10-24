@@ -5,7 +5,7 @@
 [![CI](https://github.com/notaaaronfr/Glyph/actions/workflows/ci.yml/badge.svg)](https://github.com/notaaaronfr/Glyph/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-AI now writes much of the world's code, and the bottleneck has moved from *writing* code to *trusting* it. In Glyph, code can't hide what it does: every function signature is a complete, machine-checked statement of what the function may touch and what it promises. Read [the vision](VISION.md).
+AI now writes much of the world's code, and the bottleneck has moved from *writing* code to *trusting* it. In Glyph, code can't hide what it does: every function signature states what the function may touch, which the compiler checks before anything runs, and what it promises, which is checked on every call. Proving those promises for all inputs is on the roadmap. Read [the vision](VISION.md) for where Glyph is going and what is true today.
 
 ```python
 fn withdraw(balance: Int, amount: Int) -> Int
@@ -31,10 +31,10 @@ test "withdraw subtracts" {
 - **Static types.** Type errors are reported before the program runs, with hints.
 - **Contracts with blame.** `requires` and `ensures` are checked on every call. A failed precondition is blamed on the caller; a failed postcondition is blamed on the function.
 - **Built-in tests.** `test "name" { assert ... }` blocks live next to the code.
-- **Native compiler.** `glyph build` produces a standalone executable that behaves identically to the interpreter, down to the error messages.
+- **Native compiler.** `glyph build` produces a standalone executable. The test suite holds it to byte-identical behaviour with the interpreter, down to the error messages.
 - **Memory without a garbage collector.** Native code frees every value the moment it's no longer used, and updates values in place when nothing else shares them. [More below](#memory-management).
 - **Errors for agents.** With `--json`, every diagnostic is a JSON object with the exact values involved, so an AI can fix its own mistakes in a loop.
-- **AI fixes, verified.** `glyph fix` asks Claude to repair errors and failing tests, and accepts a fix only if Glyph can verify it. [More below](#glyph-fix-ai-proposes-glyph-proves).
+- **AI fixes, checked.** `glyph fix` asks Claude to repair errors and failing tests, and accepts a fix only if it passes Glyph's checks. [More below](#glyph-fix-ai-proposes-glyph-checks).
 
 What an AI mistake looks like in Glyph:
 
@@ -66,11 +66,11 @@ glyph test    examples/bank.gly             # run test blocks
 glyph check   examples/ai_mistakes.gly      # static checks only
 glyph effects examples/bank.gly             # what each function may do
 glyph test    examples/bug.gly --json       # machine-readable results
-glyph fix     examples/bug.gly              # AI-proposed fix, verified by Glyph
+glyph fix     examples/bug.gly              # AI-proposed fix, checked by Glyph
 glyph run     examples/kernel/hello.gly --target kernel   # boot on bare metal in QEMU
 ```
 
-## `glyph fix`: AI proposes, Glyph proves
+## `glyph fix`: AI proposes, Glyph checks
 
 `glyph fix` sends the problems Glyph found to Claude and checks every proposed fix. A fix is accepted only if it:
 
@@ -232,7 +232,7 @@ Glyph OS: all 4 apps finished
 
 The kernel grants each app exactly the effects its `main` declares, and checks every service call against them: printing and reading input need `io`, the clock and `sleep` need `time`, and random numbers need `rand`. `busy` above declares only `io`, so the kernel won't let it read the clock. Error reports are always allowed, so an app with no effects can still say why it failed.
 
-The compiler already guarantees that Glyph code never uses an effect it didn't declare. The kernel checks again at run time, so an app whose compiled code was changed still can't do more than it declared. The tests simulate exactly that: `GLYPH_KERNEL_GRANT="clock=io"` makes the kernel grant `clock` less than its code uses.
+The compiler already checks that Glyph code never uses an effect it didn't declare. The kernel checks again at run time, so an app whose compiled code was changed still can't get more than it declared through the kernel's services. Apps still run in kernel mode, so code that bypasses those services entirely is not stopped yet; user mode is the next step. The tests simulate exactly that: `GLYPH_KERNEL_GRANT="clock=io"` makes the kernel grant `clock` less than its code uses.
 
 ```
 $ GLYPH_KERNEL_GRANT="clock=io" glyph run counter.gly clock.gly --target kernel
@@ -363,7 +363,7 @@ print(first(["a", "b"]))           # Some { value: "a" }
 Glyph is **early and experimental**: expect breaking changes.
 
 - [x] Interpreter, static types, effects, contracts, tests, JSON diagnostics
-- [x] Native compiler with identical behaviour
+- [x] Native compiler, held to identical behaviour by the test suite
 - [x] Records
 - [x] Enums and exhaustive `match`
 - [x] Generics, with built-in `Option[T]` and `Result[T, E]`
@@ -381,9 +381,9 @@ Glyph is **early and experimental**: expect breaking changes.
 - [x] Several apps at once: preemptive scheduler, per-app stacks and heaps, crash isolation
 - [x] Effects as permissions: the kernel grants each app what its `main` declares and stops an app that asks for more
 - [ ] Glyph OS next steps: apps in user mode (EL0) with system calls and per-app address spaces, messages between apps, a device driver interface
-- [ ] The north star: **Glyph OS**, a whole system where every program's effects are declared, checked by the compiler and enforced by the kernel
+- [ ] **Glyph OS** as a whole system where every program's effects are declared, checked by the compiler and enforced by the kernel. [VISION.md](VISION.md#glyph-os-a-shipped-track-held-to-the-gate) says how OS work is ordered
 
-See [VISION.md](VISION.md) for the full picture.
+The phased plan, with an exit test for every phase, is in [VISION.md](VISION.md#roadmap).
 
 ## Contributing
 
