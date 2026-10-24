@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
 
 const USAGE: &str = "\
-Glyph 0.9 - a language AI can write and humans can trust
+Glyph 0.10 - a language AI can write and humans can trust
 
 usage: glyph <command> <file.gly> [options]
 
@@ -364,14 +364,24 @@ const KERNEL_LINKER_SCRIPT: &str = "\
 ENTRY(_start)
 SECTIONS {
   . = 0x40080000;
+  __text_start = .;
   .text : { KEEP(*(.text.boot)) *(.text .text.*) }
-  .rodata : { *(.rodata .rodata.*) }
-  .data : { *(.data .data.*) }
+  . = ALIGN(4096);
+  __text_end = .;
+  .rodata : { *(.rodata .rodata.*) *(.eh_frame*) }
+  . = ALIGN(4096);
+  __rodata_end = .;
+  .data : { *(.data .data.*) *(.got*) }
   . = ALIGN(16);
   __bss_start = .;
   .bss (NOLOAD) : { *(.bss .bss.* COMMON) }
   . = ALIGN(16);
   __bss_end = .;
+  . = ALIGN(0x200000);
+  __image_end = .;
+  __guard_start = .;
+  . += 0x200000;
+  __stack_bottom = .;
   . += 0x1000000;
   __stack_top = .;
   __heap_start = .;
@@ -417,6 +427,11 @@ fn compile_kernel(c: &str, out: &Path) -> Result<(), String> {
             "-fuse-ld=lld",
         ])
         .arg(format!("-Wl,-T,{}", ld_file.display()))
+        .args(
+            std::env::var("GLYPH_KERNEL_CFLAGS")
+                .unwrap_or_default()
+                .split_whitespace(),
+        )
         .arg("-o")
         .arg(out)
         .arg(&c_file)

@@ -4,9 +4,13 @@
  * needs from one: memory allocation, text formatting, the serial port (for `print` and
  * `input`), the clock, and a way to stop the machine.
  *
- * The MMU stays off in this first version, so all memory is identity-mapped and
- * uncached; the code is built with -mstrict-align because unaligned accesses fault
- * without the MMU. */
+ * At boot the MMU is switched on with page tables that give every region of memory
+ * exactly the access it needs: kernel code is read-only and executable, constants are
+ * read-only, data / stack / heap are writable but never executable, device registers
+ * are uncached, and everything else (including address 0 and a guard region below the
+ * stack) is unmapped, so a stray access traps instead of corrupting memory. The code
+ * is built with -mstrict-align because it runs briefly with the MMU off at boot, when
+ * unaligned accesses fault. */
 
 #define TN_KERNEL 1
 
@@ -18,6 +22,7 @@
 /* ---- boot ---- */
 
 void tn_kernel_main(void);
+void tn_kernel_boot(void);
 void tn_kernel_trap(uint64_t kind, uint64_t esr, uint64_t elr, uint64_t far);
 
 __asm__(
@@ -44,7 +49,7 @@ __asm__(
     "    b.hs 2f\n"
     "    str xzr, [x0], #8\n"
     "    b 1b\n"
-    "2:  bl tn_kernel_main\n"
+    "2:  bl tn_kernel_boot\n"
     "tn_park:\n"
     "    wfe\n"
     "    b tn_park\n"
@@ -336,14 +341,149 @@ void tn_kernel_out_of_memory(void) {
     tn_exit(71);
 }
 
+extern char __guard_start[], __stack_bottom[];
+
+/* CPU exceptions: explain what went wrong, then stop the machine. */
 void tn_kernel_trap(uint64_t kind, uint64_t esr, uint64_t elr, uint64_t far) {
-    char msg[160];
+    uint64_t ec = esr >> 26, fsc = esr & 0x3f;
+    bool data = ec == 0x24 || ec == 0x25, code = ec == 0x20 || ec == 0x21;
+    bool write = data && (esr & (1 << 6));
+    bool permission = (fsc & 0x3c) == 0x0c;
+    const char *what;
+    if ((data || code) && far >= (uint64_t)__guard_start && far < (uint64_t)__stack_bottom)
+        what = "stack overflow";
+    else if ((data || code) && far < 0x10000)
+        what = "null pointer access";
+    else if (data && permission && write)
+        what = "write to read-only memory";
+    else if (code && permission)
+        what = "tried to run memory that isn't code";
+    else if (data || code)
+        what = "access to unmapped memory";
+    else
+        what = "CPU exception";
+    char msg[200];
     int n = snprintf(msg, sizeof msg,
-                     "kernel panic: CPU exception %llu (ESR %llx) at %llx, address %llx\n",
-                     (unsigned long long)kind, (unsigned long long)esr, (unsigned long long)elr,
-                     (unsigned long long)far);
+                     "kernel panic: %s (address %llx, at instruction %llx; exception %llu, ESR %llx)\n",
+                     what, (unsigned long long)far, (unsigned long long)elr,
+                     (unsigned long long)kind, (unsigned long long)esr);
     tn_out(msg, (size_t)n);
     tn_exit(70);
+}
+
+/* ---- memory protection: page tables and the MMU ----
+ * Identity mapping (virtual address = physical address) with a 4 KB granule and 39-bit
+ * addresses, so translation starts at level 1 (1 GB per entry):
+ *   0x00000000 - 0x07ffffff  unmapped: null pointers fault
+ *   0x08000000 - 0x0fffffff  devices (interrupt controller, serial port, ...), uncached
+ *   0x40000000 - kernel      unmapped
+ *   kernel image             4 KB pages: code RX, constants R, data RW
+ *   guard (2 MB)             unmapped: stack overflow faults
+ *   stack, heap              RW, never executable, up to the end of RAM */
+
+#define TN_PAGE 0x1000ULL
+#define TN_BLOCK_2M 0x200000ULL
+#define TN_RAM 0x40000000ULL
+#define TN_L3_TABLES 8 /* page-granular mapping for the first 16 MB of RAM */
+
+#define TN_D_BLOCK 1ULL        /* level 1/2: maps a whole block */
+#define TN_D_TABLE 3ULL        /* level 1/2: points to the next table */
+#define TN_D_PAGE 3ULL         /* level 3: maps one page */
+#define TN_D_AF (1ULL << 10)   /* accessed flag (otherwise the first access faults) */
+#define TN_D_INNER (3ULL << 8) /* inner shareable */
+#define TN_D_RO (2ULL << 6)    /* read-only */
+#define TN_D_PXN (1ULL << 53)  /* never executable by the kernel */
+#define TN_D_UXN (1ULL << 54)  /* never executable by user code */
+#define TN_D_NORMAL ((1ULL << 2) | TN_D_INNER | TN_D_AF) /* MAIR attribute 1 */
+#define TN_D_DEVICE ((0ULL << 2) | TN_D_AF | TN_D_PXN | TN_D_UXN) /* attribute 0 */
+
+static uint64_t tn_l1[512] __attribute__((aligned(4096)));
+static uint64_t tn_l2_low[512] __attribute__((aligned(4096)));
+static uint64_t tn_l2_ram[512] __attribute__((aligned(4096)));
+static uint64_t tn_l3[TN_L3_TABLES][512] __attribute__((aligned(4096)));
+
+extern char __text_start[], __text_end[], __rodata_end[], __image_end[];
+static void tn_mmu_on(void) {
+    for (uint64_t a = 0x08000000; a < 0x10000000; a += TN_BLOCK_2M)
+        tn_l2_low[a / TN_BLOCK_2M] = a | TN_D_DEVICE | TN_D_BLOCK;
+    tn_l1[0] = (uint64_t)tn_l2_low | TN_D_TABLE;
+
+    uint64_t text = (uint64_t)__text_start, text_end = (uint64_t)__text_end;
+    uint64_t ro_end = (uint64_t)__rodata_end, image_end = (uint64_t)__image_end;
+    uint64_t tables = (image_end - TN_RAM) / TN_BLOCK_2M;
+    if (tables > TN_L3_TABLES) {
+        tn_out("kernel panic: the kernel image is too large to map\n", 51);
+        tn_exit(72);
+    }
+    for (uint64_t a = text; a < image_end; a += TN_PAGE) {
+        uint64_t i = (a - TN_RAM) / TN_PAGE, attr;
+        if (a < text_end) attr = TN_D_NORMAL | TN_D_RO | TN_D_UXN;
+        else if (a < ro_end) attr = TN_D_NORMAL | TN_D_RO | TN_D_PXN | TN_D_UXN;
+        else attr = TN_D_NORMAL | TN_D_PXN | TN_D_UXN;
+        tn_l3[i / 512][i % 512] = a | attr | TN_D_PAGE;
+    }
+    for (uint64_t t = 0; t < tables; t++) tn_l2_ram[t] = (uint64_t)tn_l3[t] | TN_D_TABLE;
+    for (uint64_t a = (uint64_t)__stack_bottom; a < (uint64_t)__heap_end; a += TN_BLOCK_2M)
+        tn_l2_ram[(a - TN_RAM) / TN_BLOCK_2M] = a | TN_D_NORMAL | TN_D_PXN | TN_D_UXN | TN_D_BLOCK;
+    tn_l1[1] = (uint64_t)tn_l2_ram | TN_D_TABLE;
+
+    uint64_t mmfr0;
+    __asm__ volatile("mrs %0, id_aa64mmfr0_el1" : "=r"(mmfr0));
+    uint64_t mair = 0x00 | (0xffULL << 8); /* 0: device nGnRnE, 1: normal write-back */
+    uint64_t tcr = 25                      /* T0SZ: 39-bit addresses */
+                   | (1ULL << 8)           /* inner write-back cacheable walks */
+                   | (1ULL << 10)          /* outer write-back cacheable walks */
+                   | (3ULL << 12)          /* inner shareable */
+                   | (1ULL << 23)          /* no upper-half (TTBR1) translations */
+                   | ((mmfr0 & 0xf) << 32); /* physical address size the CPU supports */
+    __asm__ volatile("msr mair_el1, %0\n"
+                     "msr tcr_el1, %1\n"
+                     "msr ttbr0_el1, %2\n"
+                     "dsb ish\n"
+                     "isb\n"
+                     "tlbi vmalle1\n"
+                     "dsb ish\n"
+                     "isb\n"
+                     :
+                     : "r"(mair), "r"(tcr), "r"((uint64_t)tn_l1)
+                     : "memory");
+    uint64_t sctlr;
+    __asm__ volatile("mrs %0, sctlr_el1" : "=r"(sctlr));
+    sctlr |= (1 << 0)    /* MMU on */
+             | (1 << 2)  /* data cache on */
+             | (1 << 12) /* instruction cache on */
+             | (1 << 19); /* writable memory is never executable */
+    sctlr &= ~(uint64_t)(1 << 1); /* no alignment checking */
+    __asm__ volatile("msr sctlr_el1, %0\nisb\nic iallu\ndsb ish\nisb" : : "r"(sctlr) : "memory");
+}
+
+#ifdef TN_SELFTEST
+/* Deliberate faults, to test the protection (GLYPH_KERNEL_CFLAGS=-DTN_SELFTEST=n). */
+static int tn_selftest_deep(int n) {
+    volatile char buf[1024];
+    buf[0] = (char)n;
+    return tn_selftest_deep(n + 1) + buf[0];
+}
+
+static void tn_selftest(int which) {
+    static uint32_t data_code[4];
+    switch (which) {
+    case 1: *(volatile uint32_t *)(void *)&tn_mmu_on = 0; break;     /* write to code */
+    case 2: (void)*(volatile uint64_t *)(uintptr_t)8; break;         /* null pointer */
+    case 3: tn_selftest_deep(0); break;                              /* stack overflow */
+    case 4: ((void (*)(void))(void *)data_code)(); break;            /* run data */
+    }
+}
+#endif
+
+void tn_kernel_boot(void) {
+#ifndef TN_NO_MMU /* GLYPH_KERNEL_CFLAGS=-DTN_NO_MMU: run without protection or caches */
+    tn_mmu_on();
+#endif
+#ifdef TN_SELFTEST
+    tn_selftest(TN_SELFTEST);
+#endif
+    tn_kernel_main();
 }
 
 /* ---- end of kernel platform ---- */

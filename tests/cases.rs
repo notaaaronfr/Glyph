@@ -239,6 +239,11 @@ fn tests_inside_imported_modules_run() {
 /// port. Returns None (the test is skipped) if QEMU or a bare-metal clang is missing,
 /// unless GLYPH_REQUIRE_KERNEL is set, as in CI.
 fn boot(file: &str, input: &str) -> Option<String> {
+    boot_with(file, input, "")
+}
+
+/// Like `boot`, with extra C flags for the kernel build (GLYPH_KERNEL_CFLAGS).
+fn boot_with(file: &str, input: &str, cflags: &str) -> Option<String> {
     use std::io::Write;
     let have = |cmd: &str| {
         Command::new(cmd)
@@ -265,6 +270,7 @@ fn boot(file: &str, input: &str) -> Option<String> {
     }
     let mut child = Command::new(env!("CARGO_BIN_EXE_glyph"))
         .args(["run", file, "--target", "kernel"])
+        .env("GLYPH_KERNEL_CFLAGS", cflags)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -347,4 +353,35 @@ fn kernel_target_rejects_effects_it_cannot_provide() {
         "{}",
         out
     );
+}
+
+/// The MMU is on: each deliberate fault (built in with -DTN_SELFTEST=n) must be
+/// caught by the page tables and explained, instead of corrupting memory.
+#[test]
+fn kernel_memory_protection_catches_faults() {
+    let cases = [
+        (1, "write to read-only memory"),
+        (2, "null pointer access"),
+        (3, "stack overflow"),
+        (4, "tried to run memory that isn't code"),
+    ];
+    for (n, expected) in cases {
+        let flags = format!("-DTN_SELFTEST={}", n);
+        let Some(out) = boot_with("examples/kernel/hello.gly", "", &flags) else {
+            return;
+        };
+        assert!(out.starts_with("exit: 70"), "self-test {}:\n{}", n, out);
+        assert!(
+            out.contains(&format!("kernel panic: {}", expected)),
+            "self-test {}:\n{}",
+            n,
+            out
+        );
+        assert!(
+            !out.contains("Hello from Glyph OS"),
+            "self-test {}:\n{}",
+            n,
+            out
+        );
+    }
 }

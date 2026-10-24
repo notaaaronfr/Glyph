@@ -167,10 +167,23 @@ No Windows, no macOS, no Linux: Glyph is running directly on the CPU.
 status: ready / busy (42%)
 built a list of 100000 items on the kernel heap
 fib(25) = 75025
-took 114 ms
+took 8 ms
 ```
 
-The kernel platform ([src/kernel.c](src/kernel.c)) boots the CPU and provides a memory allocator, the serial port (`print` and `input`) and the hardware timer (`now`). Everything else is ordinary Glyph: records, enums, generics, modules, contracts, and the same reference-counted memory management. Errors show the same messages and source lines as on a desktop.
+The kernel platform ([src/kernel.c](src/kernel.c)) boots the CPU and provides a memory allocator, the serial port (`print` and `input`) and the hardware timer (`now`).
+
+**Memory protection is on.** At boot the kernel switches on the MMU and caches with page tables that give each region of memory only the access it needs: code is read-only, data is never executable, device registers are uncached, and address 0 plus a guard region below the stack are unmapped. Bugs that would silently corrupt memory are caught and explained instead:
+
+| Fault | Kernel says |
+|---|---|
+| Writing into code | `kernel panic: write to read-only memory` |
+| Reading through a null pointer | `kernel panic: null pointer access` |
+| Recursing past the end of the stack | `kernel panic: stack overflow` |
+| Jumping into data | `kernel panic: tried to run memory that isn't code` |
+
+Glyph code itself can't do these things. The protection guards against bugs in the runtime and, later, in drivers and other programs. The tests trigger each fault on purpose with `GLYPH_KERNEL_CFLAGS=-DTN_SELFTEST=1` through `4`.
+
+Separating code from data also made kernel programs about 8 to 15 times faster under QEMU, which re-translates code whenever a page holding code is written. QEMU doesn't model cache timing, so the effect of turning the caches on only shows on real hardware. Everything else is ordinary Glyph: records, enums, generics, modules, contracts, and the same reference-counted memory management. Errors show the same messages and source lines as on a desktop.
 
 **Effects are what the hardware provides.** The kernel target has no file system yet, so a program whose functions declare `uses fs` is rejected at compile time instead of failing at runtime:
 
@@ -210,7 +223,7 @@ GLYPH_MEMSTATS=1 glyph run app.gly --native
 # glyph memstats: 1415650 allocated, 1415650 freed, 0 live at exit, peak 40023 live
 ```
 
-## Language reference (v0.9)
+## Language reference (v0.10)
 
 | Feature | Syntax |
 |---|---|
@@ -310,7 +323,8 @@ Glyph is **early and experimental**: expect breaking changes.
 - [ ] Finer capabilities (`uses net("api.example.com")`), property tests, compile-time contract proofs
 - [ ] Editor support (LSP), package manager
 - [x] Glyph runs on bare metal (`--target kernel`): boots in QEMU, serial I/O, timer, kernel heap
-- [ ] Glyph OS next steps: MMU and caches, interrupts, a device driver interface, multiple programs with effects enforced as permissions
+- [x] Memory protection on the kernel: MMU, caches, read-only code, no-execute data, null and stack guards
+- [ ] Glyph OS next steps: interrupts and a timer tick, a device driver interface, multiple programs with effects enforced as permissions
 - [ ] The north star: **Glyph OS**, where the kernel enforces effects as permissions
 
 See [VISION.md](VISION.md) for the full picture.
