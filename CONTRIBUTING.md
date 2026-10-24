@@ -18,32 +18,46 @@ cargo test --release
 
 ## How the code is organised
 
+The workspace is split along the trust boundary described in [VISION.md](VISION.md#trust-model). Each crate declares its trust level in `[package.metadata.glyph]`, and `scripts/tcb.sh` counts the trusted lines.
+
 ```
-src/
-  lexer.rs     source text → tokens
-  parser.rs    tokens → syntax tree (ast.rs)
-  loader.rs    finds and loads imported modules, gives their items qualified names
-  check.rs     static checks: names, arity, types, effects
-  interp.rs    tree-walking interpreter (glyph run, glyph test)
-  codegen.rs   native compiler: syntax tree → C
-  runtime.c    small C runtime embedded in every native executable
-  kernel.c     Glyph OS kernel for `--target kernel`: boot, MMU, interrupts, scheduler,
-               per-app heaps, serial port, timer
-  kernel_api.h what the kernel provides to apps (each app is compiled against it)
-  error.rs     diagnostics (human-readable and JSON)
-  fix.rs       `glyph fix`: AI repair loop, its guard rails, and the Claude API client
-  main.rs      command-line interface
+crates/
+  glyph-front/     trusted: what a program means
+    lexer.rs       source text → tokens
+    parser.rs      tokens → syntax tree (ast.rs)
+    loader.rs      finds and loads imported modules, gives their items qualified names
+    check.rs       static checks: names, arity, types, effects
+    error.rs       diagnostics (human-readable and JSON)
+  glyph-run/       trusted: the reference semantics
+    interp.rs      tree-walking interpreter (glyph run, glyph test)
+  glyph-kernel/    trusted for claims about Glyph OS
+    kernel.c       the kernel for `--target kernel`: boot, MMU, interrupts, scheduler,
+                   per-app heaps, serial port, timer, effect permissions
+    kernel_api.h   what the kernel provides to apps (each app is compiled against it)
+    lib.rs         each app's grant table, the boot image build, QEMU
+  glyph-native/    trusted only for claims about native binaries
+    codegen.rs     native compiler: syntax tree → C (hosted, or an app for the kernel)
+    runtime.c      small C runtime embedded in every native executable and app
+src/               the `glyph` command, not trusted
+  fix.rs           `glyph fix`: AI repair loop, its guard rails, and the Claude API client
+  main.rs          command-line interface
 tests/
-  cases/       snapshot tests: *.gly programs and their *.expected output
-               (cases/lib/ holds modules they import)
-  cases.rs     the test harness
-  fix/         a broken program, an honest fix and "cheating" fixes for the guard tests
-  memory/      programs checked for leaks, use-after-free and in-place reuse
-  kernel/      kernel-target tests (the boot tests also use examples/kernel/)
-examples/      example programs
+  cases/           snapshot tests: *.gly programs and their *.expected output
+                   (cases/lib/ holds modules they import)
+  cases.rs         the test harness
+  redteam/         candidates `glyph fix` must reject without side effects, and their recorded state
+  redteam.rs       fails when a case's behaviour changes, so a fix flips its case in the same change
+  fix/             a broken program, an honest fix and "cheating" fixes for the guard tests
+  memory/          programs checked for leaks, use-after-free and in-place reuse
+  kernel/          kernel-target tests (the boot tests also use examples/kernel/)
+scripts/
+  tcb.sh           trusted-base size and `forbid(unsafe_code)` check (needs jq)
+  exit/            one script per roadmap phase; a phase is done when its script passes
+docs/decisions/    why the project is shaped the way it is
+examples/          example programs
 ```
 
-A typical language feature touches, in order: `lexer.rs` → `parser.rs`/`ast.rs` → `check.rs` → `interp.rs` → `codegen.rs` (and maybe `runtime.c`) → a test case.
+A typical language feature touches, in order: `lexer.rs` → `parser.rs`/`ast.rs` → `check.rs` → `interp.rs` → `codegen.rs` (and maybe `runtime.c`) → a test case. A change to a trusted crate is a change to what Glyph promises, so it needs a test that would have caught the old behaviour.
 
 ## The golden rule: interpreter and native must agree
 
@@ -64,9 +78,10 @@ Read the generated `.expected` file carefully: it becomes the definition of corr
 Before opening a pull request, run:
 
 ```sh
-cargo fmt
-cargo clippy --release -- -D warnings
-cargo test --release
+cargo fmt --all
+cargo clippy --release --workspace --all-targets -- -D warnings
+cargo test --release --workspace
+scripts/tcb.sh
 ```
 
 CI runs the same checks on Linux and macOS. The kernel tests boot QEMU; locally they are skipped unless `qemu-system-aarch64`, clang and lld are installed (`brew install qemu llvm lld`).

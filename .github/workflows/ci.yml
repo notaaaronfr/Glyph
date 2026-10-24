@@ -29,8 +29,10 @@ jobs:
           echo "GLYPH_KERNEL_CC=clang" >> "$GITHUB_ENV"
           echo "GLYPH_REQUIRE_KERNEL=1" >> "$GITHUB_ENV"
       - name: Format
-        run: cargo fmt --check
+        run: cargo fmt --all --check
       - name: Lint
-        run: cargo clippy --release -- -D warnings
-      - name: Test (interpreter, native and kernel backends)
-        run: cargo test --release
+        run: cargo clippy --release --workspace --all-targets --locked -- -D warnings
+      - name: Test (interpreter, native and kernel backends, red-team cases)
+        run: cargo test --release --workspace --locked
+      - name: Trusted base (needs jq, which the runners include)
+        run: scripts/tcb.sh
