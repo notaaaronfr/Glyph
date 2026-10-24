@@ -32,8 +32,8 @@ impl App {
             .find(|f| f.name == "main")
             .map(|m| m.effects.iter().map(|e| e.0.clone()).collect())
             .unwrap_or_default();
-        if let Some(granted) = grant_override(&name) {
-            grant = granted;
+        if let Some(only) = grant_override(&name) {
+            grant.retain(|e| only.contains(e));
         }
         App { name, c, grant }
     }
@@ -105,7 +105,8 @@ SECTIONS {
 
 /// For testing the kernel's checks: GLYPH_KERNEL_GRANT="clock=io;busy=" makes the
 /// kernel grant those apps only the listed effects, as if their compiled code had been
-/// changed to do more than it declares.
+/// changed to do more than it declares. It can only take effects away: an effect the
+/// app's `main` doesn't declare is never granted, whatever the variable says.
 fn grant_override(app: &str) -> Option<Vec<String>> {
     let spec = std::env::var("GLYPH_KERNEL_GRANT").ok()?;
     spec.split(';').find_map(|entry| {

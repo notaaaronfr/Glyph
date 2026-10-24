@@ -558,3 +558,21 @@ fn kernel_stops_an_app_that_exceeds_its_effects() {
     assert!(out.contains("dice         exit 77"), "{}", out);
     assert!(out.contains("counter      exit 0"), "{}", out);
 }
+
+#[test]
+fn kernel_grant_override_cannot_widen_permissions() {
+    // busy declares only `io`; the override asks for more, and must not get it.
+    let apps = [
+        "examples/kernel/apps/busy.gly",
+        "examples/kernel/apps/counter.gly",
+    ];
+    let Some(out) = boot_granted(&apps, "", "", "busy=io,time,rand") else {
+        return;
+    };
+    assert!(out.starts_with("exit: 0"), "{out}");
+    let busy = out
+        .lines()
+        .find(|l| l.starts_with("  busy "))
+        .unwrap_or_else(|| panic!("no summary line for busy in:\n{out}"));
+    assert!(busy.ends_with("allowed io"), "{out}");
+}
