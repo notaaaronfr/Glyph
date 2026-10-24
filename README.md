@@ -81,6 +81,8 @@ glyph run     examples/kernel/hello.gly --target kernel   # boot on bare metal i
 
 Rejected proposals go back to the model with the reasons, up to `--tries` times (default 3). The file is only changed with `--write`.
 
+**Known limits.** The guard compares contract and test text in the same file the model rewrites, so it can be bypassed: a model can rewrite a helper a contract calls, add a `requires`, or change whitespace inside a test's string literal. Candidate tests also run with real filesystem access. Each known bypass is a case in [`tests/redteam`](tests/redteam), and [the vision](VISION.md#roadmap) describes the replacement, `glyph accept`.
+
 An illustrative session (the model's explanation will vary):
 
 ```
@@ -370,7 +372,7 @@ Glyph is **early and experimental**: expect breaking changes.
 - [x] Memory management for native code: precise reference counting with in-place reuse
 - [ ] Reuse of matched enum values (Perceus "reuse analysis"), borrowed parameters
 - [x] Modules, with `pub` visibility and effects checked across files
-- [x] `glyph fix`: AI repair loop. Fixes are accepted only if they type-check, add no effects, keep every contract and test, and pass
+- [x] `glyph fix`: AI repair loop. Fixes are accepted only if they type-check, add no effects, keep every contract and test, and pass (with [known bypasses](tests/redteam))
 - [ ] `uses ai`: model calls as a typed, declared effect
 - [ ] `glyph build --tune`: learned, meaning-preserving optimization
 - [ ] Finer capabilities (`uses net("api.example.com")`), property tests, compile-time contract proofs

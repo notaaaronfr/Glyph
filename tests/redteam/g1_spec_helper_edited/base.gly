@@ -1,0 +1,4 @@
+# G1: the contract and the test call `allowed`; the candidate rewrites `allowed` instead of fixing `value`.
+fn allowed(x: Int) -> Bool { return x >= 0 }
+fn value() -> Int ensures allowed(result) { return -1 }
+test "valid result" { assert allowed(value()) }

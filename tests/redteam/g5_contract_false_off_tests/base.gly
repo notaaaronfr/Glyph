@@ -1,0 +1,6 @@
+# G5: contracts are checked only on the inputs tests use, so a body that breaks `ensures` elsewhere is accepted.
+fn clamp(x: Int) -> Int
+  ensures result >= 0 and result <= 100
+{ return x }
+test "in range" { assert clamp(50) == 50 }
+test "high" { assert clamp(150) == 100 }
