@@ -1,8 +1,8 @@
 //! Tree-walking interpreter. Checks types at function boundaries and
 //! evaluates `requires` / `ensures` on every call.
 
-use crate::ast::*;
-use crate::error::{Error, Pos};
+use glyph_front::ast::*;
+use glyph_front::{Error, Pos};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;

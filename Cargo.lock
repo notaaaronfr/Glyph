@@ -91,8 +91,38 @@ dependencies = [
 name = "glyph"
 version = "0.13.0"
 dependencies = [
+ "glyph-front",
+ "glyph-kernel",
+ "glyph-native",
+ "glyph-run",
  "serde_json",
  "ureq",
+]
+
+[[package]]
+name = "glyph-front"
+version = "0.13.0"
+
+[[package]]
+name = "glyph-kernel"
+version = "0.13.0"
+dependencies = [
+ "glyph-front",
+]
+
+[[package]]
+name = "glyph-native"
+version = "0.13.0"
+dependencies = [
+ "glyph-front",
+ "glyph-kernel",
+]
+
+[[package]]
+name = "glyph-run"
+version = "0.13.0"
+dependencies = [
+ "glyph-front",
 ]
 
 [[package]]
