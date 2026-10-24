@@ -100,7 +100,7 @@ impl Value {
     /// Like Display, but strings are quoted. Used inside lists and in diagnostics.
     pub fn repr(&self) -> String {
         match self {
-            Value::Str(s) => format!("{:?}", s),
+            Value::Str(s) => quote(s),
             v => v.to_string(),
         }
     }
@@ -116,6 +116,35 @@ impl Value {
             Value::Enum(e) => e.enum_name.clone(),
         }
     }
+}
+
+/// Quotes a string exactly as `tn_show` in runtime.c does, so both backends print the
+/// same bytes: ASCII control characters are escaped, everything else is written as is.
+fn quote(s: &str) -> String {
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            '\0' => out.push_str("\\0"),
+            c if c < ' ' || c == '\x7f' => {
+                let code = c as u32;
+                out.push_str(&format!("\\u{{{code:x}}}"));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Trims the whitespace `tn_parse_digits` in runtime.c trims: space and \t to \r, never
+/// Unicode whitespace, so `int` and `parse_int` accept the same strings in both backends.
+fn trim_ascii_space(s: &str) -> &str {
+    s.trim_matches(|c: char| c == ' ' || ('\t'..='\r').contains(&c))
 }
 
 impl fmt::Display for Value {
@@ -648,12 +677,11 @@ impl<'a> Interp<'a> {
             ("len", [Str(s)]) => Int(s.chars().count() as i64),
             ("str", [v]) => Str(v.to_string()),
             ("int", [Int(n)]) => Int(*n),
-            ("int", [Str(s)]) => Int(s
-                .trim()
+            ("int", [Str(s)]) => Int(trim_ascii_space(s)
                 .parse()
-                .map_err(|_| rt(format!("cannot convert {:?} to Int", s)))?),
+                .map_err(|_| rt(format!("cannot convert {} to Int", quote(s))))?),
             ("parse_int", [Str(s)]) => {
-                let (variant, fields) = match s.trim().parse::<i64>() {
+                let (variant, fields) = match trim_ascii_space(s).parse::<i64>() {
                     Ok(n) => ("Some", vec![("value".to_string(), Int(n))]),
                     Err(_) => ("None", vec![]),
                 };
@@ -686,9 +714,9 @@ impl<'a> Interp<'a> {
             ("contains", [List(xs), v]) => Bool(xs.contains(v)),
             ("contains", [Str(s), Str(sub)]) => Bool(s.contains(sub.as_str())),
             ("read_file", [Str(p)]) => Str(std::fs::read_to_string(p)
-                .map_err(|e| rt(format!("cannot read {:?}: {}", p, e)))?),
+                .map_err(|e| rt(format!("cannot read {}: {e}", quote(p))))?),
             ("write_file", [Str(p), Str(c)]) => {
-                std::fs::write(p, c).map_err(|e| rt(format!("cannot write {:?}: {}", p, e)))?;
+                std::fs::write(p, c).map_err(|e| rt(format!("cannot write {}: {e}", quote(p))))?;
                 Unit
             }
             ("now", []) => Int(std::time::SystemTime::now()

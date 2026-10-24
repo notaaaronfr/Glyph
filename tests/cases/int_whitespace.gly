@@ -1,0 +1,7 @@
+# int() and parse_int() trim the same whitespace in both backends: ASCII space and tab through carriage return, nothing else.
+fn main() uses io {
+  print(int(" \t42\n "))
+  print(parse_int(" \t42\n "))
+  print(parse_int(" 7 "))
+  print(int(" 7 "))
+}

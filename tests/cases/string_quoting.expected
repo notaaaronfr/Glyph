@@ -1,0 +1,4 @@
+exit: 0
+--- stdout ---
+["a b", "tab\tquote\"end", "café"]
+--- stderr ---
