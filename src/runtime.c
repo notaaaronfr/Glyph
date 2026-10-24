@@ -9,6 +9,9 @@
  * reference counting alone reclaims everything. When a value has exactly one owner,
  * updates (push, record field assignment) happen in place instead of copying. */
 
+#ifndef TN_KERNEL
+/* ---- hosted platform: a normal operating system with a C library ----
+ * (The kernel platform, kernel.c, provides the same functions on bare metal.) */
 #include <errno.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -19,7 +22,16 @@
 #include <sys/time.h>
 #include <time.h>
 
+static void tn_out(const char *s, size_t n) { fwrite(s, 1, n, stdout); }
+static void tn_err(const char *s, size_t n) { fwrite(s, 1, n, stderr); }
+static void tn_flush(void) { fflush(stdout); }
+__attribute__((noreturn)) static void tn_exit(int code) { exit(code); }
+static const char *tn_getenv(const char *name) { return getenv(name); }
+#endif
+
 #define TN_MAX_DEPTH 10000
+
+static void tn_errf(const char *fmt, ...);
 
 typedef uint8_t tn_unit;
 typedef struct { int32_t file, line, col; } tn_loc;
@@ -85,8 +97,8 @@ static int64_t tn_allocs = 0, tn_frees = 0, tn_live = 0, tn_peak = 0;
 static void *tn_alloc(size_t n) {
     void *p = malloc(n ? n : 1);
     if (!p) {
-        fputs("out of memory\n", stderr);
-        exit(1);
+        tn_err("out of memory\n", 14);
+        tn_exit(1);
     }
     return p;
 }
@@ -190,9 +202,9 @@ static inline void tn_drop_val(tn_val v, const tn_type *t) {
 }
 
 static void tn_memstats(void) {
-    if (!getenv("GLYPH_MEMSTATS")) return;
-    fflush(stdout);
-    fprintf(stderr, "glyph memstats: %lld allocated, %lld freed, %lld live at exit, peak %lld live\n",
+    if (!tn_getenv("GLYPH_MEMSTATS")) return;
+    tn_flush();
+    tn_errf("glyph memstats: %lld allocated, %lld freed, %lld live at exit, peak %lld live\n",
             (long long)tn_allocs, (long long)tn_frees, (long long)tn_live, (long long)tn_peak);
 }
 
@@ -208,10 +220,29 @@ static const char *tn_fmt(const char *fmt, ...) {
     return s;
 }
 
+/* printf to standard error. */
+static void tn_errf(const char *fmt, ...) {
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    if (n < (int)sizeof buf) {
+        tn_err(buf, n);
+        return;
+    }
+    char *big = tn_alloc(n + 1);
+    va_start(ap, fmt);
+    vsnprintf(big, n + 1, fmt, ap);
+    va_end(ap);
+    tn_err(big, n);
+    free(big);
+}
+
 /* Same format as the interpreter: location, message, source line, caret, hint. */
 __attribute__((noreturn)) static void tn_fail(const char *kind, tn_loc at, const char *msg, const char *hint) {
-    fflush(stdout);
-    fprintf(stderr, "%s:%d:%d: %s error: %s\n", TN_FILES[at.file], at.line, at.col, kind, msg);
+    tn_flush();
+    tn_errf("%s:%d:%d: %s error: %s\n", TN_FILES[at.file], at.line, at.col, kind, msg);
     const char *p = TN_SOURCES[at.file];
     int line = 1;
     while (*p && line < at.line) {
@@ -224,11 +255,11 @@ __attribute__((noreturn)) static void tn_fail(const char *kind, tn_loc at, const
         if (len > 0 && p[len - 1] == '\r') len--;
         char num[32];
         int w = snprintf(num, sizeof num, "%d", at.line);
-        fprintf(stderr, "%s | %.*s\n", num, len, p);
-        fprintf(stderr, "%*s | %*s^\n", w, "", at.col - 1, "");
+        tn_errf("%s | %.*s\n", num, len, p);
+        tn_errf("%*s | %*s^\n", w, "", at.col - 1, "");
     }
-    if (hint) fprintf(stderr, "  hint: %s\n", hint);
-    exit(1);
+    if (hint) tn_errf("  hint: %s\n", hint);
+    tn_exit(1);
 }
 
 __attribute__((noreturn)) static void tn_fail_depth(tn_loc at, const char *fn) {
@@ -722,30 +753,64 @@ static int64_t tn_parse_int(tn_str *s, tn_loc at) {
 /* Takes ownership of the parts. */
 static tn_unit tn_print(int n, tn_str **parts) {
     for (int i = 0; i < n; i++) {
-        if (i) fputc(' ', stdout);
-        fwrite(parts[i]->data, 1, parts[i]->len, stdout);
+        if (i) tn_out(" ", 1);
+        tn_out(parts[i]->data, parts[i]->len);
         tn_drop(parts[i]);
     }
-    fputc('\n', stdout);
+    tn_out("\n", 1);
     return 0;
 }
 
 static tn_str *tn_input(tn_str *prompt, tn_loc at) {
     (void)at;
-    if (prompt) fwrite(prompt->data, 1, prompt->len, stdout);
-    fflush(stdout);
+    if (prompt) tn_out(prompt->data, prompt->len);
+    tn_flush();
     tn_sb b = {0};
+#ifdef TN_KERNEL
+    /* The serial port is a raw terminal: echo what is typed, handle backspace. */
+    for (;;) {
+        int c = tn_uart_getc();
+        if (c == '\r' || c == '\n') {
+            tn_out("\n", 1);
+            break;
+        }
+        if (c == 0x7f || c == 0x08) {
+            if (b.len > 0) {
+                b.len--;
+                tn_out("\b \b", 3);
+            }
+            continue;
+        }
+        char ch = (char)c;
+        tn_out(&ch, 1);
+        tn_sb_put(&b, &ch, 1);
+    }
+#else
     int c;
     while ((c = fgetc(stdin)) != EOF && c != '\n') {
         char ch = (char)c;
         tn_sb_put(&b, &ch, 1);
     }
+#endif
     while (b.len > 0 && b.p[b.len - 1] == '\r') b.len--;
     tn_str *s = tn_str_from(b.p ? b.p : "", b.len);
     free(b.p);
     return s;
 }
 
+#ifdef TN_KERNEL
+/* No file system yet: programs that declare `uses fs` are rejected for this target. */
+static tn_str *tn_read_file(tn_str *path, tn_loc at) {
+    (void)path;
+    tn_fail("runtime", at, "files are not available on the kernel target", NULL);
+}
+static tn_unit tn_write_file(tn_str *path, tn_str *content, tn_loc at) {
+    (void)path, (void)content;
+    tn_fail("runtime", at, "files are not available on the kernel target", NULL);
+}
+static int64_t tn_now(void) { return (int64_t)(tn_ticks() / (tn_tick_freq() / 1000)); }
+static void tn_init(void) { tn_rng = tn_ticks() | 1; }
+#else
 static tn_str *tn_read_file(tn_str *path, tn_loc at) {
     FILE *f = fopen(path->data, "rb");
     if (!f)
@@ -776,20 +841,21 @@ static int64_t tn_now(void) {
     return (int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
 }
 
-static int64_t tn_random(int64_t n, tn_loc at) {
-    if (n <= 0) tn_fail("runtime", at, "invalid arguments to `random`: the limit must be positive", NULL);
-    tn_rng ^= tn_rng << 13;
-    tn_rng ^= tn_rng >> 7;
-    tn_rng ^= tn_rng << 17;
-    return (int64_t)(tn_rng % (uint64_t)n);
-}
-
 static void tn_init(void) {
     static char buf[1 << 16];
     setvbuf(stdout, buf, _IOFBF, sizeof buf);
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     tn_rng = ((uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec) | 1;
+}
+#endif
+
+static int64_t tn_random(int64_t n, tn_loc at) {
+    if (n <= 0) tn_fail("runtime", at, "invalid arguments to `random`: the limit must be positive", NULL);
+    tn_rng ^= tn_rng << 13;
+    tn_rng ^= tn_rng >> 7;
+    tn_rng ^= tn_rng << 17;
+    return (int64_t)(tn_rng % (uint64_t)n);
 }
 
 /* ---- end of runtime ---- */

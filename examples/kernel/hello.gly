@@ -1,0 +1,41 @@
+# The first Glyph OS program: runs on bare hardware, with no operating system.
+#   glyph run examples/kernel/hello.gly --target kernel
+
+type Task { name: Str, done: Bool }
+
+enum Status {
+  Ready
+  Busy { load: Int }
+}
+
+fn describe(s: Status) -> Str {
+  match s {
+    Ready => { return "ready" }
+    Busy { load } => { return "busy (" + str(load) + "%)" }
+  }
+}
+
+fn fib(n: Int) -> Int {
+  if n < 2 { return n }
+  return fib(n - 1) + fib(n - 2)
+}
+
+fn main() uses io, time {
+  let start = now()
+  print("Hello from Glyph OS!")
+  print("No Windows, no macOS, no Linux: Glyph is running directly on the CPU.")
+
+  let tasks = [Task { name: "boot", done: true }, Task { name: "memory", done: true }, Task { name: "serial port", done: true }]
+  for t in tasks {
+    print("  [x]", t.name)
+  }
+  print("status:", describe(Ready), "/", describe(Busy { load: 42 }))
+
+  let xs: List[Int] = []
+  for i in range(100000) {
+    xs = push(xs, i)
+  }
+  print("built a list of", len(xs), "items on the kernel heap")
+  print("fib(25) =", fib(25))
+  print("took", now() - start, "ms")
+}

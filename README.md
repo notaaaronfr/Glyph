@@ -67,6 +67,7 @@ glyph check   examples/ai_mistakes.gly      # static checks only
 glyph effects examples/bank.gly             # what each function may do
 glyph test    examples/bug.gly --json       # machine-readable results
 glyph fix     examples/bug.gly              # AI-proposed fix, verified by Glyph
+glyph run     examples/kernel/hello.gly --target kernel   # boot on bare metal in QEMU
 ```
 
 ## `glyph fix`: AI proposes, Glyph proves
@@ -152,6 +153,36 @@ fn main() uses io {
 
 Effects are checked across files: calling `geometry.report()`, which `uses io`, requires the caller to declare `io` too. Each module is loaded once; import cycles and missing modules are reported with the chain or path involved. Errors, including runtime errors in native code, point at the module's own file and line. `glyph test` also runs the tests inside imported modules.
 
+## Glyph OS: running on bare metal
+
+Glyph programs can run with no operating system at all. `--target kernel` builds a kernel image for an ARM64 machine and boots it in QEMU:
+
+```
+$ glyph run examples/kernel/hello.gly --target kernel
+Hello from Glyph OS!
+No Windows, no macOS, no Linux: Glyph is running directly on the CPU.
+  [x] boot
+  [x] memory
+  [x] serial port
+status: ready / busy (42%)
+built a list of 100000 items on the kernel heap
+fib(25) = 75025
+took 114 ms
+```
+
+The kernel platform ([src/kernel.c](src/kernel.c)) boots the CPU and provides a memory allocator, the serial port (`print` and `input`) and the hardware timer (`now`). Everything else is ordinary Glyph: records, enums, generics, modules, contracts, and the same reference-counted memory management. Errors show the same messages and source lines as on a desktop.
+
+**Effects are what the hardware provides.** The kernel target has no file system yet, so a program whose functions declare `uses fs` is rejected at compile time instead of failing at runtime:
+
+```
+save.gly:1:16: effect error: `save` uses effect `fs`, which the kernel target doesn't provide
+  hint: the kernel target provides: io, time, rand
+```
+
+This is the first step toward the vision of an OS that enforces effects as permissions. There's also a small interactive shell, [examples/kernel/shell.gly](examples/kernel/shell.gly), with `help`, `echo`, `fib`, `sum`, `uptime` and `exit`.
+
+To use the kernel target you need QEMU, clang and lld: `brew install qemu llvm lld` on macOS, or `apt install qemu-system-arm clang lld` on Debian or Ubuntu. CI boots the kernel on every change.
+
 ## Memory management
 
 Natively compiled Glyph uses **precise reference counting with in-place reuse**, in the style of [Perceus](https://www.microsoft.com/en-us/research/publication/perceus-garbage-free-reference-counting-with-reuse/) (Koka, Lean 4):
@@ -179,7 +210,7 @@ GLYPH_MEMSTATS=1 glyph run app.gly --native
 # glyph memstats: 1415650 allocated, 1415650 freed, 0 live at exit, peak 40023 live
 ```
 
-## Language reference (v0.8)
+## Language reference (v0.9)
 
 | Feature | Syntax |
 |---|---|
@@ -278,6 +309,8 @@ Glyph is **early and experimental**: expect breaking changes.
 - [ ] `glyph build --tune`: learned, meaning-preserving optimization
 - [ ] Finer capabilities (`uses net("api.example.com")`), property tests, compile-time contract proofs
 - [ ] Editor support (LSP), package manager
+- [x] Glyph runs on bare metal (`--target kernel`): boots in QEMU, serial I/O, timer, kernel heap
+- [ ] Glyph OS next steps: MMU and caches, interrupts, a device driver interface, multiple programs with effects enforced as permissions
 - [ ] The north star: **Glyph OS**, where the kernel enforces effects as permissions
 
 See [VISION.md](VISION.md) for the full picture.

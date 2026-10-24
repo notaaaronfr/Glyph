@@ -27,6 +27,7 @@ src/
   interp.rs    tree-walking interpreter (glyph run, glyph test)
   codegen.rs   native compiler: syntax tree → C
   runtime.c    small C runtime embedded in every native executable
+  kernel.c     bare-metal platform for `--target kernel`: boot, allocator, serial, timer
   error.rs     diagnostics (human-readable and JSON)
   fix.rs       `glyph fix`: AI repair loop, its guard rails, and the Claude API client
   main.rs      command-line interface
@@ -36,6 +37,7 @@ tests/
   cases.rs     the test harness
   fix/         a broken program, an honest fix and "cheating" fixes for the guard tests
   memory/      programs checked for leaks, use-after-free and in-place reuse
+  kernel/      kernel-target tests (the boot tests also use examples/kernel/)
 examples/      example programs
 ```
 
@@ -65,7 +67,7 @@ cargo clippy --release -- -D warnings
 cargo test --release
 ```
 
-CI runs the same checks on Linux and macOS.
+CI runs the same checks on Linux and macOS. The kernel tests boot QEMU; locally they are skipped unless `qemu-system-aarch64`, clang and lld are installed (`brew install qemu llvm lld`).
 
 ## Memory in the native backend
 

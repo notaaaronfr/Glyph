@@ -234,3 +234,112 @@ fn tests_inside_imported_modules_run() {
     assert!(out.starts_with("exit: 0"), "{}", out);
     assert!(out.contains("PASS  lib.geometry: distance"), "{}", out);
 }
+
+/// Boots `file` with `glyph run --target kernel` in QEMU, feeding `input` to the serial
+/// port. Returns None (the test is skipped) if QEMU or a bare-metal clang is missing,
+/// unless GLYPH_REQUIRE_KERNEL is set, as in CI.
+fn boot(file: &str, input: &str) -> Option<String> {
+    use std::io::Write;
+    let have = |cmd: &str| {
+        Command::new(cmd)
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+    };
+    let cc = std::env::var("GLYPH_KERNEL_CC").unwrap_or_else(|_| {
+        [
+            "/opt/homebrew/opt/llvm/bin/clang",
+            "/usr/local/opt/llvm/bin/clang",
+        ]
+        .iter()
+        .find(|p| Path::new(p).exists())
+        .map_or("clang".to_string(), |p| p.to_string())
+    });
+    if !have("qemu-system-aarch64") || !have(&cc) {
+        assert!(
+            std::env::var_os("GLYPH_REQUIRE_KERNEL").is_none(),
+            "kernel tests need qemu-system-aarch64, clang and lld"
+        );
+        eprintln!("skipping kernel test: qemu-system-aarch64 or clang not found");
+        return None;
+    }
+    let mut child = Command::new(env!("CARGO_BIN_EXE_glyph"))
+        .args(["run", file, "--target", "kernel"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to run glyph");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() > deadline {
+            child.kill().ok();
+            panic!("{} did not finish booting and exit within 120 s", file);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let out = child.wait_with_output().unwrap();
+    Some(
+        format!(
+            "exit: {}\n--- stdout ---\n{}--- stderr ---\n{}",
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+        .replace('\r', ""),
+    )
+}
+
+#[test]
+fn kernel_boots_and_runs_glyph() {
+    let Some(out) = boot("examples/kernel/hello.gly", "") else {
+        return;
+    };
+    assert!(out.starts_with("exit: 0"), "{}", out);
+    assert!(out.contains("Hello from Glyph OS!"), "{}", out);
+    assert!(out.contains("built a list of 100000 items"), "{}", out);
+    assert!(out.contains("fib(25) = 75025"), "{}", out);
+}
+
+#[test]
+fn kernel_shell_reads_the_serial_port() {
+    let Some(out) = boot("examples/kernel/shell.gly", "fib 20\nsum 1 2 3\nexit\n") else {
+        return;
+    };
+    assert!(out.starts_with("exit: 0"), "{}", out);
+    assert!(out.contains("fib(20) = 6765"), "{}", out);
+    assert!(out.contains("sum = 6"), "{}", out);
+    assert!(out.contains("powering off"), "{}", out);
+}
+
+#[test]
+fn kernel_reports_errors_with_source_lines() {
+    let Some(out) = boot("tests/cases/postcondition.gly", "") else {
+        return;
+    };
+    assert!(out.starts_with("exit: 1"), "{}", out);
+    assert!(
+        out.contains("postcondition of `discount` violated: `result <= price`"),
+        "{}",
+        out
+    );
+    assert!(out.contains("5 |   ensures result <= price"), "{}", out);
+}
+
+#[test]
+fn kernel_target_rejects_effects_it_cannot_provide() {
+    let out = glyph(&["build", "tests/kernel/uses_fs.gly", "--target", "kernel"]);
+    assert!(out.starts_with("exit: 1"), "{}", out);
+    assert!(
+        out.contains("`save` uses effect `fs`, which the kernel target doesn't provide"),
+        "{}",
+        out
+    );
+}

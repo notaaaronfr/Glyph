@@ -1,0 +1,68 @@
+# Glyph OS shell: an interactive program running on bare metal.
+#   glyph run examples/kernel/shell.gly --target kernel
+# Type `help` for commands, `exit` to power off. (In QEMU, Ctrl-A then X also quits.)
+
+enum Command {
+  Help
+  Echo { text: Str }
+  Fib { n: Int }
+  Uptime
+  Sum { numbers: List[Int] }
+  Exit
+  Unknown { word: Str }
+}
+
+fn parse(line: Str) -> Command {
+  let words = split(line, " ")
+  let cmd = words[0]
+  let rest: List[Str] = []
+  let i = 1
+  while i < len(words) {
+    rest = push(rest, words[i])
+    i = i + 1
+  }
+  if cmd == "help" { return Help }
+  if cmd == "echo" { return Echo { text: join(rest, " ") } }
+  if cmd == "uptime" { return Uptime }
+  if cmd == "exit" { return Exit }
+  if cmd == "fib" and len(rest) == 1 { return Fib { n: int(rest[0]) } }
+  if cmd == "sum" {
+    let nums: List[Int] = []
+    for w in rest {
+      nums = push(nums, int(w))
+    }
+    return Sum { numbers: nums }
+  }
+  return Unknown { word: cmd }
+}
+
+fn fib(n: Int) -> Int
+  requires n >= 0 and n <= 40
+{
+  if n < 2 { return n }
+  return fib(n - 1) + fib(n - 2)
+}
+
+fn main() uses io, time {
+  print("Glyph OS 0.1 - type `help`")
+  let running = true
+  while running {
+    let line = input("glyph> ")
+    match parse(line) {
+      Help => { print("commands: help, echo <text>, fib <n>, sum <numbers...>, uptime, exit") }
+      Echo { text } => { print(text) }
+      Fib { n } => { print("fib(" + str(n) + ") =", fib(n)) }
+      Uptime => { print("up for", now(), "ms") }
+      Sum { numbers } => {
+        let total = 0
+        for x in numbers { total = total + x }
+        print("sum =", total)
+      }
+      Exit => {
+        print("powering off")
+        running = false
+      }
+      Unknown { word } => { print("unknown command:", word, "(try `help`)") }
+    }
+  }
+}

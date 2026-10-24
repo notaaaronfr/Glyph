@@ -21,9 +21,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Install the kernel toolchain (QEMU, clang, lld)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-arm clang lld
+          echo "GLYPH_KERNEL_CC=clang" >> "$GITHUB_ENV"
+          echo "GLYPH_REQUIRE_KERNEL=1" >> "$GITHUB_ENV"
       - name: Format
         run: cargo fmt --check
       - name: Lint
         run: cargo clippy --release -- -D warnings
-      - name: Test (interpreter and native backends)
+      - name: Test (interpreter, native and kernel backends)
         run: cargo test --release

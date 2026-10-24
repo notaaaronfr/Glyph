@@ -1,0 +1,8 @@
+# The kernel target has no file system yet, so this must be rejected at compile time.
+fn save() uses fs {
+  write_file("notes.txt", "hello")
+}
+
+fn main() uses io {
+  print("hi")
+}
