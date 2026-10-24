@@ -1,0 +1,3 @@
+# G4: the baseline does not parse, so the guard has no tests or contracts to protect.
+fn broken() -> Int { return 1
+test "must survive" { assert false }

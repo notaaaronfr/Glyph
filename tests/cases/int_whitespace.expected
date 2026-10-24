@@ -1,0 +1,9 @@
+exit: 1
+--- stdout ---
+42
+Some { value: 42 }
+None
+--- stderr ---
+tests/cases/int_whitespace.gly:6:9: runtime error: cannot convert " 7 " to Int
+6 |   print(int(" 7 "))
+  |         ^

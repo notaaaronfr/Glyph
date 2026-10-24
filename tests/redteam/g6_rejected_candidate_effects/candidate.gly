@@ -1,0 +1,6 @@
+# G6: a candidate that is rejected still ran its tests with real filesystem access.
+fn value() -> Int uses fs {
+  write_file("marker.txt", "candidate ran")
+  return 0
+}
+test "one" uses fs { assert value() == 1 }

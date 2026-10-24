@@ -1,10 +1,19 @@
-[package]
-name = "glyph"
+[workspace]
+members = ["crates/*"]
+
+[workspace.package]
 version = "0.13.0"
 edition = "2021"
-description = "Glyph: a language AI can write and humans can trust. Declared effects, contracts, built-in tests, native compiler."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/notaaaronfr/Glyph"
+
+[package]
+name = "glyph"
+version.workspace = true
+edition.workspace = true
+description = "Glyph: a language AI can write and humans can trust. Declared effects, contracts, built-in tests, native compiler."
+license.workspace = true
+repository.workspace = true
 readme = "README.md"
 keywords = ["language", "compiler", "interpreter", "effects", "contracts"]
 categories = ["compilers", "development-tools"]
@@ -12,6 +21,13 @@ categories = ["compilers", "development-tools"]
 [[bin]]
 name = "glyph"
 
+[package.metadata.glyph]
+trust = "none"
+
 [dependencies]
+glyph-front = { path = "crates/glyph-front" }
+glyph-kernel = { path = "crates/glyph-kernel" }
+glyph-native = { path = "crates/glyph-native" }
+glyph-run = { path = "crates/glyph-run" }
 serde_json = "1"
 ureq = "2"

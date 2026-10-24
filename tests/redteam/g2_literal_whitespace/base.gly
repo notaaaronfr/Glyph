@@ -1,0 +1,3 @@
+# G2: the candidate changes the test's expected string; whitespace normalization hides the edit.
+fn label() -> Str { return "a  b" }
+test "exact label" { assert label() == "a b" }

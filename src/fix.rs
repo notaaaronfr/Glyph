@@ -5,9 +5,9 @@
 //! test unchanged, and passes all tests. Rejected proposals go back to the model
 //! with the reasons, up to `--tries` times.
 
-use crate::ast::Program;
-use crate::error::Sources;
-use crate::{check, interp, loader};
+use glyph_front::ast::{Func, Program};
+use glyph_front::{check, load, Pos, Sources};
+use glyph_run::Interp;
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::mpsc;
@@ -146,11 +146,11 @@ fn accept(file: &str, old: &str, new: &str, explanation: Option<&str>, write: bo
 
 /// Everything Glyph would complain about: syntax, static checks, failing tests.
 fn diagnose(file: &str, src: &str) -> Vec<String> {
-    let (prog, sources, mut errs) = match loader::load(file, src) {
+    let (prog, sources, mut errs) = match load(file, src) {
         Ok(l) => (l.program, l.sources, l.errors),
         Err((errs, sources)) => return errs.iter().map(|e| e.render(&sources)).collect(),
     };
-    if let Err(more) = check::check(&prog) {
+    if let Err(more) = check(&prog) {
         errs.extend(more);
     }
     if !errs.is_empty() {
@@ -168,7 +168,7 @@ fn run_tests(p: &Program, sources: &Sources) -> Vec<String> {
         .spawn(move || {
             let mut failures = vec![];
             for t in &prog.tests {
-                if let Err(e) = interp::Interp::new(&prog).run_test(t) {
+                if let Err(e) = Interp::new(&prog).run_test(t) {
                     failures.push(format!(
                         "test \"{}\" failed:\n{}",
                         t.name,
@@ -214,7 +214,7 @@ impl Baseline {
             tests: HashMap::new(),
             exact: false,
         };
-        let Ok(p) = loader::load(file, src).map(|l| l.program) else {
+        let Ok(p) = load(file, src).map(|l| l.program) else {
             b.all_effects = scan_uses(src);
             return b;
         };
@@ -235,7 +235,7 @@ impl Baseline {
     }
 }
 
-fn contract_texts(f: &crate::ast::Func) -> Vec<String> {
+fn contract_texts(f: &Func) -> Vec<String> {
     let req = f
         .requires
         .iter()
@@ -275,7 +275,7 @@ fn scan_uses(src: &str) -> BTreeSet<String> {
 /// The guard rails. A fix must not gain powers or weaken its own specification.
 fn guard(base: &Baseline, cand: &Program) -> Vec<String> {
     let mut v = vec![];
-    let mut check_effects = |kind: &str, name: &str, effects: &[(String, crate::error::Pos)]| {
+    let mut check_effects = |kind: &str, name: &str, effects: &[(String, Pos)]| {
         let key = format!("{} {}", kind, name);
         let allowed = base
             .effects
@@ -337,11 +337,11 @@ fn guard(base: &Baseline, cand: &Program) -> Vec<String> {
 }
 
 fn verify(base: &Baseline, file: &str, cand: &str) -> Result<(), Vec<String>> {
-    let (prog, sources, mut errs) = match loader::load(file, cand) {
+    let (prog, sources, mut errs) = match load(file, cand) {
         Ok(l) => (l.program, l.sources, l.errors),
         Err((errs, sources)) => return Err(errs.iter().map(|e| e.render(&sources)).collect()),
     };
-    if let Err(more) = check::check(&prog) {
+    if let Err(more) = check(&prog) {
         errs.extend(more);
     }
     if !errs.is_empty() {

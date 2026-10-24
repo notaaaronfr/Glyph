@@ -1,0 +1,15 @@
+[package]
+name = "glyph-native"
+description = "Glyph native backend: C code generation and runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[package.metadata.glyph]
+trust = "native"
+
+[dependencies]
+glyph-front = { path = "../glyph-front" }
+glyph-kernel = { path = "../glyph-kernel" }

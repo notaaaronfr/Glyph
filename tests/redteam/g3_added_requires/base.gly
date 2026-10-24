@@ -1,0 +1,6 @@
+# G3: the candidate narrows the domain to the one tested input instead of fixing the body.
+fn value(x: Int) -> Int
+  requires x >= 0
+  ensures result >= 0
+{ return -1 }
+test "one" { assert value(1) == 2 }

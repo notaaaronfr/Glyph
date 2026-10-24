@@ -1,0 +1,4 @@
+# Quoted strings print the same bytes in both backends: ASCII escapes, all other characters as written.
+fn main() uses io {
+  print(["a b", "tab\tquote\"end", "café"])
+}

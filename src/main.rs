@@ -1,14 +1,8 @@
-mod ast;
-mod check;
-mod codegen;
-mod error;
 mod fix;
-mod interp;
-mod lexer;
-mod loader;
-mod parser;
 
-use error::{json_str, Error, Pos, Sources};
+use glyph_front::{check, json_str, load, Error, Pos, Sources};
+use glyph_native::{emit_c, Target};
+use glyph_run::Interp;
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
 
@@ -50,7 +44,7 @@ struct Opts {
     native: bool,
     emit_c: bool,
     out: Option<String>,
-    target: codegen::Target,
+    target: Target,
     fix: fix::FixOpts,
 }
 
@@ -58,7 +52,7 @@ fn parse_args() -> Opts {
     let mut args = std::env::args().skip(1);
     let mut positional = vec![];
     let (mut json, mut native, mut emit_c, mut out) = (false, false, false, None);
-    let mut target = codegen::Target::Hosted;
+    let mut target = Target::Hosted;
     let mut fix = fix::FixOpts {
         tries: 3,
         write: false,
@@ -72,8 +66,8 @@ fn parse_args() -> Opts {
             "--emit-c" => emit_c = true,
             "-o" => out = args.next(),
             "--target" => match args.next().as_deref() {
-                Some("native") => target = codegen::Target::Hosted,
-                Some("kernel") => target = codegen::Target::Kernel,
+                Some("native") => target = Target::Hosted,
+                Some("kernel") => target = Target::Kernel,
                 other => {
                     eprintln!(
                         "unknown target `{}`: use `native` or `kernel`",
@@ -110,7 +104,7 @@ fn parse_args() -> Opts {
     let cmd = positional.remove(0);
     let files = positional;
     let file = files[0].clone();
-    if files.len() > 1 && !(target == codegen::Target::Kernel && (cmd == "run" || cmd == "build")) {
+    if files.len() > 1 && !(target == Target::Kernel && (cmd == "run" || cmd == "build")) {
         eprintln!("several files can only be given to `run` or `build` with `--target kernel`, as apps for Glyph OS");
         exit(2);
     }
@@ -166,17 +160,17 @@ fn run(o: &Opts, src: &str) -> i32 {
     if o.cmd == "fix" {
         return fix::run(file, src, &o.fix);
     }
-    if o.target == codegen::Target::Kernel && (o.cmd == "run" || o.cmd == "build") {
+    if o.target == Target::Kernel && (o.cmd == "run" || o.cmd == "build") {
         return glyph_os(o);
     }
-    let (prog, sources, mut errs) = match loader::load(file, src) {
+    let (prog, sources, mut errs) = match load(file, src) {
         Ok(l) => (l.program, l.sources, l.errors),
         Err((errs, sources)) => {
             report(&errs, &sources, json);
             return 1;
         }
     };
-    let checked = check::check(&prog);
+    let checked = check(&prog);
     if let Err(more) = &checked {
         errs.extend(more.iter().cloned());
     }
@@ -222,7 +216,7 @@ fn run(o: &Opts, src: &str) -> i32 {
             0
         }
         "build" => {
-            let c = match codegen::emit_c(&prog, &types, &sources, o.target) {
+            let c = match emit_c(&prog, &types, &sources, o.target) {
                 Ok(c) => c,
                 Err(e) => {
                     report(&[e], &sources, json);
@@ -258,7 +252,7 @@ fn run(o: &Opts, src: &str) -> i32 {
             }
         }
         "run" if o.native => {
-            let c = match codegen::emit_c(&prog, &types, &sources, o.target) {
+            let c = match emit_c(&prog, &types, &sources, o.target) {
                 Ok(c) => c,
                 Err(e) => {
                     report(&[e], &sources, json);
@@ -304,7 +298,7 @@ fn run(o: &Opts, src: &str) -> i32 {
                 );
                 return 1;
             }
-            match interp::Interp::new(&prog).call("main", vec![], main.pos) {
+            match Interp::new(&prog).call("main", vec![], main.pos) {
                 Ok(_) => 0,
                 Err(e) => {
                     report(&[e], &sources, json);
@@ -315,7 +309,7 @@ fn run(o: &Opts, src: &str) -> i32 {
         _ => {
             let mut failed = 0;
             for t in &prog.tests {
-                let res = interp::Interp::new(&prog).run_test(t);
+                let res = Interp::new(&prog).run_test(t);
                 if json {
                     let err = res
                         .as_ref()
@@ -353,21 +347,18 @@ fn run(o: &Opts, src: &str) -> i32 {
     }
 }
 
-const KERNEL: &str = include_str!("kernel.c");
-const KERNEL_API: &str = include_str!("kernel_api.h");
-const MAX_APPS: usize = 7;
-
 /// `run` / `build` with `--target kernel`: each file is an app; they are compiled
 /// separately and linked with the kernel into one bootable image.
 fn glyph_os(o: &Opts) -> i32 {
-    if o.files.len() > MAX_APPS {
-        eprintln!("error: Glyph OS runs at most {} apps at once", MAX_APPS);
+    if o.files.len() > glyph_kernel::MAX_APPS {
+        eprintln!(
+            "error: Glyph OS runs at most {} apps at once",
+            glyph_kernel::MAX_APPS
+        );
         return 2;
     }
-    let mut units = vec![];
-    let mut table = vec![];
-    let mut decls = String::new();
-    for (i, file) in o.files.iter().enumerate() {
+    let mut apps = vec![];
+    for file in &o.files {
         let src = match std::fs::read_to_string(file) {
             Ok(s) => s,
             Err(e) => {
@@ -375,14 +366,14 @@ fn glyph_os(o: &Opts) -> i32 {
                 return 2;
             }
         };
-        let (prog, sources, mut errs) = match loader::load(file, &src) {
+        let (prog, sources, mut errs) = match load(file, &src) {
             Ok(l) => (l.program, l.sources, l.errors),
             Err((errs, sources)) => {
                 report(&errs, &sources, o.json);
                 return 1;
             }
         };
-        let checked = check::check(&prog);
+        let checked = check(&prog);
         if let Err(more) = &checked {
             errs.extend(more.iter().cloned());
         }
@@ -390,57 +381,19 @@ fn glyph_os(o: &Opts) -> i32 {
             report(&errs, &sources, o.json);
             return 1;
         }
-        let c = match codegen::emit_c(&prog, &checked.expect("no errors"), &sources, o.target) {
+        let c = match emit_c(&prog, &checked.expect("no errors"), &sources, o.target) {
             Ok(c) => c,
             Err(e) => {
                 report(&[e], &sources, o.json);
                 return 1;
             }
         };
-        units.push(format!(
-            "#define TN_APP_ENTRY tn_app_main_{}
-{}",
-            i, c
-        ));
         let name = Path::new(file)
             .file_stem()
             .map_or("app".into(), |s| s.to_string_lossy().into_owned());
-        // The kernel grants each app what its `main` declares, and nothing more.
-        let mut effects: Vec<String> = prog
-            .funcs
-            .iter()
-            .find(|f| f.name == "main")
-            .map(|m| m.effects.iter().map(|e| e.0.clone()).collect())
-            .unwrap_or_default();
-        if let Some(granted) = grant_override(&name) {
-            effects = granted;
-        }
-        let perms: Vec<&str> = effects
-            .iter()
-            .filter_map(|e| match e.as_str() {
-                "io" => Some("TN_PERM_IO"),
-                "time" => Some("TN_PERM_TIME"),
-                "rand" => Some("TN_PERM_RAND"),
-                _ => None, // emit_c already rejected effects the kernel lacks
-            })
-            .collect();
-        let perms = if perms.is_empty() {
-            "0".to_string()
-        } else {
-            perms.join(" | ")
-        };
-        decls += &format!("void tn_app_main_{}(void);\n", i);
-        table.push(format!("{{{:?}, tn_app_main_{}, {}}}", name, i, perms));
+        apps.push(glyph_kernel::App::new(name, c, &prog));
     }
-    let kernel = format!(
-        "{}{}\n{}const tn_app tn_apps[] = {{{}}};\nconst int tn_app_count = {};\n",
-        KERNEL_API,
-        KERNEL,
-        decls,
-        table.join(", "),
-        table.len()
-    );
-    units.insert(0, kernel);
+    let units = glyph_kernel::units(&apps);
 
     let image = if o.cmd == "build" {
         PathBuf::from(o.out.clone().unwrap_or_else(|| {
@@ -452,7 +405,7 @@ fn glyph_os(o: &Opts) -> i32 {
     } else {
         std::env::temp_dir().join(format!("glyph-os-{}.elf", std::process::id()))
     };
-    if let Err(msg) = compile_kernel(&units, &image) {
+    if let Err(msg) = glyph_kernel::build_image(&units, &image) {
         eprintln!("error: {}", msg);
         return 1;
     }
@@ -473,7 +426,7 @@ fn glyph_os(o: &Opts) -> i32 {
         }
         return 0;
     }
-    let status = qemu(&image).status();
+    let status = glyph_kernel::qemu(&image).status();
     let _ = std::fs::remove_file(&image);
     match status {
         Ok(s) => s.code().unwrap_or(1),
@@ -485,142 +438,6 @@ fn glyph_os(o: &Opts) -> i32 {
             1
         }
     }
-}
-
-/// Where the kernel image is loaded and how memory is laid out on QEMU's `virt`
-/// machine (RAM starts at 0x40000000; we use 256 MB of it).
-const KERNEL_LINKER_SCRIPT: &str = "\
-ENTRY(_start)
-SECTIONS {
-  . = 0x40080000;
-  __text_start = .;
-  .text : { KEEP(*(.text.boot)) *(.text .text.*) }
-  . = ALIGN(4096);
-  __text_end = .;
-  .rodata : { *(.rodata .rodata.*) *(.eh_frame*) }
-  . = ALIGN(4096);
-  __rodata_end = .;
-  .data : { *(.data .data.*) *(.got*) }
-  . = ALIGN(16);
-  __bss_start = .;
-  .bss (NOLOAD) : { *(.bss .bss.* COMMON) }
-  . = ALIGN(16);
-  __bss_end = .;
-  . = ALIGN(0x200000);
-  __image_end = .;
-  __stacks_start = .;
-  __stack_top = . + 0xa00000;
-  . += 0x5000000;
-  __heap_start = .;
-  __heap_end = 0x50000000;
-}
-";
-
-/// For testing the kernel's checks: GLYPH_KERNEL_GRANT="clock=io;busy=" makes the
-/// kernel grant those apps only the listed effects, as if their compiled code had been
-/// changed to do more than it declares.
-fn grant_override(app: &str) -> Option<Vec<String>> {
-    let spec = std::env::var("GLYPH_KERNEL_GRANT").ok()?;
-    spec.split(';').find_map(|entry| {
-        let (name, effects) = entry.split_once('=')?;
-        (name.trim() == app).then(|| {
-            effects
-                .split(',')
-                .map(|e| e.trim().to_string())
-                .filter(|e| !e.is_empty())
-                .collect()
-        })
-    })
-}
-
-/// A clang that can build for bare-metal AArch64 (Apple's can't link it): $GLYPH_KERNEL_CC,
-/// then Homebrew's LLVM, then `clang`.
-fn kernel_cc() -> String {
-    if let Ok(cc) = std::env::var("GLYPH_KERNEL_CC") {
-        return cc;
-    }
-    [
-        "/opt/homebrew/opt/llvm/bin/clang",
-        "/usr/local/opt/llvm/bin/clang",
-    ]
-    .iter()
-    .find(|p| Path::new(p).exists())
-    .map_or_else(|| "clang".to_string(), |p| p.to_string())
-}
-
-/// Compiles a kernel image (an ELF file QEMU can boot) from C files with clang and lld.
-fn compile_kernel(units: &[String], out: &Path) -> Result<(), String> {
-    let tmp = std::env::temp_dir();
-    let id = std::process::id();
-    let mut c_files = vec![];
-    for (i, c) in units.iter().enumerate() {
-        let f = tmp.join(format!("glyph-kernel-{}-{}.c", id, i));
-        std::fs::write(&f, c).map_err(|e| format!("cannot write {}: {}", f.display(), e))?;
-        c_files.push(f);
-    }
-    let ld_file = tmp.join(format!("glyph-kernel-{}.ld", id));
-    std::fs::write(&ld_file, KERNEL_LINKER_SCRIPT)
-        .map_err(|e| format!("cannot write {}: {}", ld_file.display(), e))?;
-    let cc = kernel_cc();
-    let result = Command::new(&cc)
-        .args([
-            "--target=aarch64-none-elf",
-            "-ffreestanding",
-            "-fno-builtin",
-            "-nostdlib",
-            "-mstrict-align",
-            "-fno-stack-protector",
-            "-O2",
-            "-w",
-            "-fuse-ld=lld",
-        ])
-        .arg(format!("-Wl,-T,{}", ld_file.display()))
-        .args(
-            std::env::var("GLYPH_KERNEL_CFLAGS")
-                .unwrap_or_default()
-                .split_whitespace(),
-        )
-        .arg("-o")
-        .arg(out)
-        .args(&c_files)
-        .output();
-    for f in &c_files {
-        let _ = std::fs::remove_file(f);
-    }
-    let _ = std::fs::remove_file(&ld_file);
-    match result {
-        Err(e) => Err(format!(
-            "cannot start `{}`: {} (the kernel target needs clang and lld: `brew install llvm lld`, or set $GLYPH_KERNEL_CC)",
-            cc, e
-        )),
-        Ok(r) if !r.status.success() => Err(format!(
-            "building the kernel image failed (if clang or lld is missing: `brew install llvm lld`):\n{}",
-            String::from_utf8_lossy(&r.stderr)
-        )),
-        Ok(_) => Ok(()),
-    }
-}
-
-/// Boots a kernel image in QEMU, with the serial port on this terminal. Semihosting
-/// lets the kernel's exit code become QEMU's.
-fn qemu(kernel: &Path) -> Command {
-    let bin = std::env::var("GLYPH_QEMU").unwrap_or_else(|_| "qemu-system-aarch64".into());
-    let mut cmd = Command::new(bin);
-    cmd.args([
-        "-M",
-        "virt,gic-version=2",
-        "-cpu",
-        "cortex-a72",
-        "-m",
-        "256M",
-        "-nographic",
-        "-no-reboot",
-        "-semihosting-config",
-        "enable=on,target=native",
-        "-kernel",
-    ])
-    .arg(kernel);
-    cmd
 }
 
 /// Writes the generated C to a temporary file and compiles it with the system C compiler.
