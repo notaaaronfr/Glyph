@@ -136,27 +136,4 @@ By contributing, you agree that your contributions are licensed under the projec
 
 ## PR Template
 
-### Summary
-
-<!-- Briefly explain what this PR does and why. -->
-
-### Changes
-
-- 
-- 
-
-### Testing
-
-<!-- Explain how you verified the changes. -->
-
-- [ ] Tests pass
-- [ ] Manually tested where applicable
-
-### Related Issue
-
-<!-- Example: Closes #123 -->
-Closes #
-
-### Screenshots / Notes
-
-<!-- Add screenshots for UI changes or any additional context. Remove if not applicable. -->
+GitHub fills in [`.github/pull_request_template.md`](.github/pull_request_template.md) when you open a pull request in the browser. If you open one from the command line, use the same sections.
