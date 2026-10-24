@@ -1,0 +1,8 @@
+# Reports the time every 300 ms.
+fn main() uses io, time {
+  let start = now()
+  for i in range(4) {
+    sleep(300)
+    print("clock:", now() - start, "ms")
+  }
+}

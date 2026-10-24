@@ -1,0 +1,8 @@
+# Counts, pausing between numbers. Other apps run while it sleeps.
+fn main() uses io, time {
+  for i in range(5) {
+    print("counter:", i + 1)
+    sleep(200)
+  }
+  print("counter: done")
+}

@@ -1,30 +1,43 @@
-/* ---- Glyph kernel platform: bare metal on QEMU's AArch64 `virt` machine ----
- * Included before the runtime when building with `--target kernel`. There is no
- * operating system underneath: this file boots the CPU and provides what the runtime
- * needs from one: memory allocation, text formatting, the serial port (for `print` and
- * `input`), the clock, and a way to stop the machine.
+/* ---- Glyph OS kernel: bare metal on QEMU's AArch64 `virt` machine ----
+ * Compiled after kernel_api.h, as its own C file; each app is another C file (the
+ * runtime plus the app's code) linked into the same kernel image. There is no
+ * operating system underneath: this file boots the CPU and provides what the apps
+ * need from one: memory, text formatting, the serial port (for `print` and `input`),
+ * the clock, and running several apps at once.
  *
- * At boot the MMU is switched on with page tables that give every region of memory
- * exactly the access it needs: kernel code is read-only and executable, constants are
- * read-only, data / stack / heap are writable but never executable, device registers
- * are uncached, and everything else (including address 0 and a guard region below the
- * stack) is unmapped, so a stray access traps instead of corrupting memory. The code
- * is built with -mstrict-align because it runs briefly with the MMU off at boot, when
- * unaligned accesses fault. */
+ * Memory protection: at boot the MMU is switched on with page tables that give every
+ * region of memory exactly the access it needs: kernel code is read-only and
+ * executable, constants are read-only, data / stacks / heaps are writable but never
+ * executable, device registers are uncached, and everything else (including address 0
+ * and a guard region below every stack) is unmapped, so a stray access traps instead
+ * of corrupting memory. The code is built with -mstrict-align because it runs briefly
+ * with the MMU off at boot, when unaligned accesses fault.
+ *
+ * Multitasking: each app is a task with its own stack and its own heap, so apps share
+ * no memory. The timer interrupt switches tasks every tick (preemption), and tasks
+ * waiting in `sleep` or `input` are parked until they can continue. An app that fails
+ * stops alone; the machine powers off when every app has finished. */
 
-#define TN_KERNEL 1
+/* ---- apps, as listed by the compiler (generated, linked in) ---- */
 
-#include <stdarg.h>
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
+typedef struct {
+    const char *name;
+    void (*entry)(void);
+    const char *effects; /* what its `main` declares, for the summary */
+} tn_app;
+extern const tn_app tn_apps[];
+extern const int tn_app_count;
 
-/* ---- boot ---- */
-
-void tn_kernel_main(void);
 void tn_kernel_boot(void);
 void tn_kernel_irq(void);
 void tn_kernel_trap(uint64_t kind, uint64_t esr, uint64_t elr, uint64_t far);
+
+/* Saved registers of a task that isn't running: the callee-saved registers x19-x28,
+ * the frame pointer x29, the return address x30, sp, and SIMD d8-d15. */
+typedef struct { uint64_t r[21]; } tn_ctx;
+void tn_switch(tn_ctx *from, tn_ctx *to);
+
+/* ---- boot, exception vectors, context switch ---- */
 
 __asm__(
     ".section .text.boot, \"ax\"\n"
@@ -55,7 +68,7 @@ __asm__(
     "    wfe\n"
     "    b tn_park\n"
     /* Exception vectors: 16 entries of 128 bytes. Each passes its index to the trap
-     * handler on a fresh stack. */
+     * handler on a fresh stack, except entry 5: an interrupt while running at EL1. */
     ".balign 2048\n"
     "tn_vectors:\n"
     ".irp i, 0, 1, 2, 3, 4\n"
@@ -63,7 +76,6 @@ __asm__(
     "    mov x0, #\\i\n"
     "    b tn_trap_entry\n"
     ".endr\n"
-    /* Entry 5: an interrupt while the kernel runs (current EL, SP_EL1). */
     "    .balign 128\n"
     "    b tn_irq_entry\n"
     ".irp i, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15\n"
@@ -71,10 +83,12 @@ __asm__(
     "    mov x0, #\\i\n"
     "    b tn_trap_entry\n"
     ".endr\n"
-    /* Interrupts can arrive anywhere, so save every register the C handler may
-     * change (the caller-saved general and SIMD registers), then return with eret. */
+    /* Interrupts can arrive anywhere, so save every register the C handler may change
+     * (the caller-saved general and SIMD registers), plus the interrupted code's
+     * return address and state (ELR, SPSR): the handler may switch to another task,
+     * and that task's own interrupt return must not use ours. */
     "tn_irq_entry:\n"
-    "    sub sp, sp, #560\n"
+    "    sub sp, sp, #576\n"
     "    stp x0, x1, [sp, #0]\n"
     "    stp x2, x3, [sp, #16]\n"
     "    stp x4, x5, [sp, #32]\n"
@@ -98,7 +112,15 @@ __asm__(
     "    stp q26, q27, [sp, #464]\n"
     "    stp q28, q29, [sp, #496]\n"
     "    stp q30, q31, [sp, #528]\n"
+    "    mrs x0, elr_el1\n"
+    "    mrs x1, spsr_el1\n"
+    "    str x0, [sp, #560]\n"
+    "    str x1, [sp, #568]\n"
     "    bl tn_kernel_irq\n"
+    "    ldr x0, [sp, #560]\n"
+    "    ldr x1, [sp, #568]\n"
+    "    msr elr_el1, x0\n"
+    "    msr spsr_el1, x1\n"
     "    ldp q30, q31, [sp, #528]\n"
     "    ldp q28, q29, [sp, #496]\n"
     "    ldp q26, q27, [sp, #464]\n"
@@ -122,7 +144,7 @@ __asm__(
     "    ldp x4, x5, [sp, #32]\n"
     "    ldp x2, x3, [sp, #16]\n"
     "    ldp x0, x1, [sp, #0]\n"
-    "    add sp, sp, #560\n"
+    "    add sp, sp, #576\n"
     "    eret\n"
     "tn_trap_entry:\n"
     "    mrs x1, esr_el1\n"
@@ -132,7 +154,36 @@ __asm__(
     "    mov sp, x4\n"
     "    bl tn_kernel_trap\n"
     "    b tn_park\n"
-    ".text\n");
+    /* tn_switch(from, to): save the callee-saved registers and sp into *from, load
+     * *to's, and return into the task they belong to. */
+    ".text\n"
+    ".global tn_switch\n"
+    "tn_switch:\n"
+    "    stp x19, x20, [x0, #0]\n"
+    "    stp x21, x22, [x0, #16]\n"
+    "    stp x23, x24, [x0, #32]\n"
+    "    stp x25, x26, [x0, #48]\n"
+    "    stp x27, x28, [x0, #64]\n"
+    "    stp x29, x30, [x0, #80]\n"
+    "    mov x9, sp\n"
+    "    str x9, [x0, #96]\n"
+    "    stp d8, d9, [x0, #104]\n"
+    "    stp d10, d11, [x0, #120]\n"
+    "    stp d12, d13, [x0, #136]\n"
+    "    stp d14, d15, [x0, #152]\n"
+    "    ldp x19, x20, [x1, #0]\n"
+    "    ldp x21, x22, [x1, #16]\n"
+    "    ldp x23, x24, [x1, #32]\n"
+    "    ldp x25, x26, [x1, #48]\n"
+    "    ldp x27, x28, [x1, #64]\n"
+    "    ldp x29, x30, [x1, #80]\n"
+    "    ldr x9, [x1, #96]\n"
+    "    mov sp, x9\n"
+    "    ldp d8, d9, [x1, #104]\n"
+    "    ldp d10, d11, [x1, #120]\n"
+    "    ldp d12, d13, [x1, #136]\n"
+    "    ldp d14, d15, [x1, #152]\n"
+    "    ret\n");
 
 /* ---- the small part of the C library the runtime uses ---- */
 
@@ -180,80 +231,8 @@ char *strchr(const char *s, int c) {
     }
 }
 
-/* ---- memory allocator ----
- * Blocks carry a 16-byte header with their usable size. Freed blocks go on a free
- * list per size class (multiples of 16 bytes up to 1 KB) or on one list for larger
- * blocks; new memory comes from the heap region after the stack. Reference counting
- * frees most blocks soon after use, so they are reused quickly. */
-
-extern char __heap_start[], __heap_end[];
-
-typedef struct tn_block { size_t size; struct tn_block *next; } tn_block;
-#define TN_SMALL_CLASSES 64
-static tn_block *tn_free_small[TN_SMALL_CLASSES + 1];
-static tn_block *tn_free_large;
-static char *tn_heap_top;
-
-void tn_kernel_out_of_memory(void);
-
-void *malloc(size_t n) {
-    size_t size = (n + 15) & ~(size_t)15;
-    if (size == 0) size = 16;
-    tn_block *b = NULL;
-    if (size <= TN_SMALL_CLASSES * 16) {
-        tn_block **list = &tn_free_small[size / 16];
-        if (*list) {
-            b = *list;
-            *list = b->next;
-        }
-    } else {
-        for (tn_block **p = &tn_free_large; *p; p = &(*p)->next) {
-            if ((*p)->size >= size) {
-                b = *p;
-                *p = b->next;
-                break;
-            }
-        }
-    }
-    if (!b) {
-        if (!tn_heap_top) tn_heap_top = __heap_start;
-        if ((size_t)(__heap_end - tn_heap_top) < size + sizeof(tn_block)) {
-            tn_kernel_out_of_memory();
-            return NULL;
-        }
-        b = (tn_block *)tn_heap_top;
-        b->size = size;
-        tn_heap_top += size + sizeof(tn_block);
-    }
-    return b + 1;
-}
-
-void free(void *p) {
-    if (!p) return;
-    tn_block *b = (tn_block *)p - 1;
-    if (b->size <= TN_SMALL_CLASSES * 16) {
-        b->next = tn_free_small[b->size / 16];
-        tn_free_small[b->size / 16] = b;
-    } else {
-        b->next = tn_free_large;
-        tn_free_large = b;
-    }
-}
-
-void *realloc(void *p, size_t n) {
-    if (!p) return malloc(n);
-    tn_block *b = (tn_block *)p - 1;
-    if (n <= b->size) return p;
-    void *q = malloc(n);
-    if (q) {
-        memcpy(q, p, b->size);
-        free(p);
-    }
-    return q;
-}
-
-/* ---- formatting: the subset of printf the runtime uses ----
- * %s %c %d %u %x %%, the `l` / `ll` length modifiers, `*` widths and `.*` precisions. */
+/* ---- formatting: the subset of printf the kernel and runtime use ----
+ * %s %c %d %u %x %%, the `-` flag, `l` / `ll`, widths (digits or `*`) and `.*`. */
 
 typedef struct { char *buf; size_t size, len; } tn_fmtbuf;
 
@@ -266,6 +245,13 @@ static void tn_fmt_pad(tn_fmtbuf *f, int n) {
     while (n-- > 0) tn_fmt_putc(f, ' ');
 }
 
+/* Writes s[0..len), padded with spaces to `width` on the left, or on the right. */
+static void tn_fmt_field(tn_fmtbuf *f, const char *s, int len, int width, bool left) {
+    if (!left) tn_fmt_pad(f, width - len);
+    for (int i = 0; i < len; i++) tn_fmt_putc(f, s[i]);
+    if (left) tn_fmt_pad(f, width - len);
+}
+
 int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap) {
     tn_fmtbuf f = {buf, size, 0};
     for (; *fmt; fmt++) {
@@ -275,6 +261,11 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap) {
         }
         fmt++;
         int width = 0, prec = -1, longs = 0;
+        bool left = false;
+        if (*fmt == '-') {
+            left = true;
+            fmt++;
+        }
         if (*fmt == '*') {
             width = va_arg(ap, int);
             fmt++;
@@ -297,14 +288,14 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap) {
             if (!s) s = "(null)";
             int len = (int)strlen(s);
             if (prec >= 0 && prec < len) len = prec;
-            tn_fmt_pad(&f, width - len);
-            for (int i = 0; i < len; i++) tn_fmt_putc(&f, s[i]);
+            tn_fmt_field(&f, s, len, width, left);
             continue;
         }
-        case 'c':
-            tn_fmt_pad(&f, width - 1);
-            tn_fmt_putc(&f, (char)va_arg(ap, int));
+        case 'c': {
+            char c = (char)va_arg(ap, int);
+            tn_fmt_field(&f, &c, 1, width, left);
             continue;
+        }
         case 'd':
         case 'i': {
             long long v = longs ? va_arg(ap, long long) : va_arg(ap, int);
@@ -326,8 +317,9 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap) {
         default:
             continue;
         }
-        tn_fmt_pad(&f, width - n);
-        while (n) tn_fmt_putc(&f, tmp[--n]);
+        char digits[24];
+        for (int i = 0; i < n; i++) digits[i] = tmp[n - 1 - i];
+        tn_fmt_field(&f, digits, n, width, left);
     }
     if (size) buf[f.len < size ? f.len : size - 1] = 0;
     return (int)f.len;
@@ -339,6 +331,125 @@ int snprintf(char *buf, size_t size, const char *fmt, ...) {
     int n = vsnprintf(buf, size, fmt, ap);
     va_end(ap);
     return n;
+}
+
+/* ---- interrupt masking ---- */
+
+static inline void tn_irqs_off(void) { __asm__ volatile("msr daifset, #2" ::: "memory"); }
+static inline void tn_irqs_on(void) { __asm__ volatile("msr daifclr, #2" ::: "memory"); }
+
+static inline uint64_t tn_irq_save(void) {
+    uint64_t daif;
+    __asm__ volatile("mrs %0, daif" : "=r"(daif));
+    tn_irqs_off();
+    return daif;
+}
+
+static inline void tn_irq_restore(uint64_t daif) {
+    __asm__ volatile("msr daif, %0" : : "r"(daif) : "memory");
+}
+
+/* ---- memory layout ----
+ * After the kernel image come 8 stack slots of 10 MB, each a 2 MB unmapped guard
+ * followed by an 8 MB stack (slot 0: boot and the kernel; slots 1-7: apps), then
+ * the heaps, one region per app, up to the end of the 256 MB of RAM. */
+
+#define TN_MAX_APPS 7
+#define TN_SLOT 0xa00000ULL
+#define TN_GUARD 0x200000ULL
+extern char __stacks_start[], __heap_start[], __heap_end[];
+
+/* ---- tasks ---- */
+
+typedef struct tn_block { size_t size; struct tn_block *next; } tn_block;
+#define TN_SMALL_CLASSES 64
+
+/* A task's private heap. Blocks carry a 16-byte header with their usable size. Freed
+ * blocks go on a free list per size class (multiples of 16 bytes up to 1 KB) or on
+ * one list for larger blocks; new memory comes from the task's region. Reference
+ * counting frees most blocks soon after use, so they are reused quickly. */
+typedef struct {
+    tn_block *small[TN_SMALL_CLASSES + 1];
+    tn_block *large;
+    char *top, *end;
+} tn_heap;
+
+enum { TN_READY, TN_SLEEPING, TN_WAITING_INPUT, TN_DONE };
+
+typedef struct {
+    const tn_app *app;
+    int state;
+    int exit_code;
+    uint64_t wake_at;   /* TN_SLEEPING: counter value to wake at */
+    uint64_t cpu_ticks; /* timer ticks it was running for */
+    tn_ctx ctx;
+    tn_heap heap;
+} tn_task;
+
+static tn_task tn_tasks[TN_MAX_APPS];
+static int tn_ntasks;
+static tn_task *tn_cur; /* NULL while booting */
+static tn_ctx tn_boot_ctx;
+
+/* ---- memory allocation (from the running task's heap) ---- */
+
+static void tn_out_of_memory(void);
+
+void *malloc(size_t n) {
+    tn_heap *h = &tn_cur->heap;
+    size_t size = (n + 15) & ~(size_t)15;
+    if (size == 0) size = 16;
+    tn_block *b = NULL;
+    if (size <= TN_SMALL_CLASSES * 16) {
+        tn_block **list = &h->small[size / 16];
+        if (*list) {
+            b = *list;
+            *list = b->next;
+        }
+    } else {
+        for (tn_block **p = &h->large; *p; p = &(*p)->next) {
+            if ((*p)->size >= size) {
+                b = *p;
+                *p = b->next;
+                break;
+            }
+        }
+    }
+    if (!b) {
+        if ((size_t)(h->end - h->top) < size + sizeof(tn_block)) {
+            tn_out_of_memory();
+            return NULL;
+        }
+        b = (tn_block *)h->top;
+        b->size = size;
+        h->top += size + sizeof(tn_block);
+    }
+    return b + 1;
+}
+
+void free(void *p) {
+    if (!p) return;
+    tn_heap *h = &tn_cur->heap;
+    tn_block *b = (tn_block *)p - 1;
+    if (b->size <= TN_SMALL_CLASSES * 16) {
+        b->next = h->small[b->size / 16];
+        h->small[b->size / 16] = b;
+    } else {
+        b->next = h->large;
+        h->large = b;
+    }
+}
+
+void *realloc(void *p, size_t n) {
+    if (!p) return malloc(n);
+    tn_block *b = (tn_block *)p - 1;
+    if (n <= b->size) return p;
+    void *q = malloc(n);
+    if (q) {
+        memcpy(q, p, b->size);
+        free(p);
+    }
+    return q;
 }
 
 /* ---- devices: the PL011 serial port and the CPU's generic timer ---- */
@@ -369,13 +480,157 @@ static void tn_uart_drain(void) {
     }
 }
 
-static inline void tn_irqs_off(void) { __asm__ volatile("msr daifset, #2" ::: "memory"); }
-static inline void tn_irqs_on(void) { __asm__ volatile("msr daifclr, #2" ::: "memory"); }
+/* Standard output and errors both go to the serial port. Interrupts are masked for
+ * the whole call, so another app's output can't land in the middle of it. */
+void tn_out(const char *s, size_t n) {
+    uint64_t daif = tn_irq_save();
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] == '\n') tn_uart_putc('\r');
+        tn_uart_putc(s[i]);
+    }
+    tn_irq_restore(daif);
+}
 
-/* Waits for the next typed character, sleeping (wfi) until an interrupt arrives.
- * Interrupts are masked while checking, so one can't slip in between the check and
- * the wfi; a pending interrupt still wakes wfi, and is taken once unmasked. */
-static int tn_uart_getc(void) {
+void tn_flush(void) {}
+
+const char *tn_getenv(const char *name) {
+    (void)name;
+    return NULL;
+}
+
+uint64_t tn_ticks(void) {
+    uint64_t t;
+    __asm__ volatile("isb; mrs %0, cntpct_el0" : "=r"(t));
+    return t;
+}
+
+uint64_t tn_tick_freq(void) {
+    uint64_t f;
+    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
+    return f;
+}
+
+/* Stops the machine. Under QEMU (with semihosting enabled) the exit code becomes
+ * QEMU's own exit code, so tests can check it. */
+__attribute__((noreturn)) static void tn_halt(int code) {
+    uint64_t block[2] = {0x20026 /* ADP_Stopped_ApplicationExit */, (uint64_t)code};
+    register uint64_t x0 __asm__("x0") = 0x18; /* SYS_EXIT */
+    register uint64_t x1 __asm__("x1") = (uint64_t)block;
+    __asm__ volatile("hlt #0xf000" : : "r"(x0), "r"(x1) : "memory");
+    for (;;) __asm__ volatile("wfe");
+}
+
+static void tn_outf(const char *fmt, ...) {
+    char buf[200];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    tn_out(buf, (size_t)(n < (int)sizeof buf ? n : (int)sizeof buf - 1));
+}
+
+/* ---- the scheduler ----
+ * Round robin over ready tasks. It runs with interrupts masked: from the timer
+ * interrupt (preemption), or when a task blocks or exits. */
+
+#define TN_HZ 100 /* timer ticks per second */
+
+/* Makes sleeping and waiting tasks ready when their time comes or input arrives. */
+static void tn_wake(void) {
+    uint64_t now = tn_ticks();
+    bool input = tn_rx_head != tn_rx_tail;
+    for (int i = 0; i < tn_ntasks; i++) {
+        tn_task *t = &tn_tasks[i];
+        if ((t->state == TN_SLEEPING && now >= t->wake_at) || (t->state == TN_WAITING_INPUT && input))
+            t->state = TN_READY;
+    }
+}
+
+/* The next ready task after the current one, or NULL. */
+static tn_task *tn_pick(void) {
+    int start = tn_cur ? (int)(tn_cur - tn_tasks) : tn_ntasks - 1;
+    for (int k = 1; k <= tn_ntasks; k++) {
+        tn_task *t = &tn_tasks[(start + k) % tn_ntasks];
+        if (t->state == TN_READY) return t;
+    }
+    return NULL;
+}
+
+static void tn_run(tn_task *next) {
+    tn_task *prev = tn_cur;
+    tn_cur = next;
+    if (prev != next) tn_switch(prev ? &prev->ctx : &tn_boot_ctx, &next->ctx);
+}
+
+__attribute__((noreturn)) static void tn_power_off(void) {
+    int code = 0;
+    for (int i = 0; i < tn_ntasks; i++)
+        if (tn_tasks[i].exit_code != 0) {
+            code = tn_tasks[i].exit_code;
+            break;
+        }
+    if (tn_ntasks > 1) {
+        tn_outf("Glyph OS: all %d apps finished\n", tn_ntasks);
+        for (int i = 0; i < tn_ntasks; i++) {
+            tn_task *t = &tn_tasks[i];
+            tn_outf("  %-12s exit %d   cpu %llu ms   uses %s\n", t->app->name, t->exit_code,
+                    (unsigned long long)(t->cpu_ticks * 1000 / TN_HZ), t->app->effects);
+        }
+    }
+    tn_halt(code);
+}
+
+/* The current task can't continue (it sleeps, waits or has finished): run another,
+ * or idle until an interrupt makes one ready. Returns once the current task is
+ * ready again. */
+static void tn_block_current(void) {
+    for (;;) {
+        tn_wake();
+        tn_task *next = tn_pick();
+        if (next) {
+            tn_run(next);
+            return;
+        }
+        bool all_done = true;
+        for (int i = 0; i < tn_ntasks; i++) all_done &= tn_tasks[i].state == TN_DONE;
+        if (all_done) tn_power_off();
+        __asm__ volatile("wfi");
+        tn_irqs_on(); /* take the interrupt that woke us */
+        tn_irqs_off();
+    }
+}
+
+/* From the timer interrupt: give the CPU to the next ready task. */
+static void tn_preempt(void) {
+    if (!tn_cur || tn_cur->state != TN_READY) return; /* idling: tn_block_current decides */
+    tn_wake();
+    tn_task *next = tn_pick();
+    if (next) tn_run(next);
+}
+
+/* Where a new task starts (tn_switch "returns" here on its fresh stack). */
+static void tn_task_start(void) {
+    tn_irqs_on();
+    tn_cur->app->entry();
+    tn_exit(0);
+}
+
+/* ---- what the kernel API offers apps ---- */
+
+void tn_sleep_ms(int64_t ms) {
+    uint64_t end = tn_ticks() + (uint64_t)ms * (tn_tick_freq() / 1000);
+    tn_irqs_off();
+    if (tn_ticks() < end) {
+        tn_cur->wake_at = end;
+        tn_cur->state = TN_SLEEPING;
+        tn_block_current();
+    }
+    tn_irqs_on();
+}
+
+/* Waits for the next typed character. Interrupts are masked while checking, so a
+ * character can't arrive unnoticed between the check and parking the task. */
+int tn_uart_getc(void) {
     for (;;) {
         tn_irqs_off();
         tn_uart_drain(); /* also catches a character whose interrupt was missed */
@@ -385,71 +640,42 @@ static int tn_uart_getc(void) {
             tn_irqs_on();
             return (unsigned char)c;
         }
-        __asm__ volatile("wfi");
+        tn_cur->state = TN_WAITING_INPUT;
+        tn_block_current();
         tn_irqs_on();
     }
 }
 
-/* Standard output and errors both go to the serial port. */
-static void tn_out(const char *s, size_t n) {
-    for (size_t i = 0; i < n; i++) {
-        if (s[i] == '\n') tn_uart_putc('\r');
-        tn_uart_putc(s[i]);
+/* Ends the current app. Before any app runs (the boot self-tests), stops the machine. */
+void tn_exit(int code) {
+    tn_irqs_off();
+    if (!tn_cur) tn_halt(code);
+    tn_cur->exit_code = code;
+    tn_cur->state = TN_DONE;
+    if (tn_ntasks > 1 && code != 0)
+        tn_outf("[Glyph OS: app %s stopped with exit code %d; the other apps keep running]\n",
+                tn_cur->app->name, code);
+    tn_block_current();
+    for (;;) {
     }
 }
-#define tn_err tn_out
 
-static void tn_flush(void) {}
-
-static const char *tn_getenv(const char *name) {
-    (void)name;
-    return NULL;
-}
-
-static uint64_t tn_ticks(void) {
-    uint64_t t;
-    __asm__ volatile("isb; mrs %0, cntpct_el0" : "=r"(t));
-    return t;
-}
-
-static uint64_t tn_tick_freq(void) {
-    uint64_t f;
-    __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
-    return f;
-}
-
-/* Sleeps until `ms` milliseconds have passed. The CPU idles in wfi and wakes on each
- * timer tick (every 10 ms), so the wake-up can be up to one tick late. */
-static void tn_sleep_ms(int64_t ms) {
-    uint64_t end = tn_ticks() + (uint64_t)ms * (tn_tick_freq() / 1000);
-    while (tn_ticks() < end) __asm__ volatile("wfi");
-}
-
-/* Stops the machine. Under QEMU (with semihosting enabled) the exit code becomes
- * QEMU's own exit code, so tests can check it. */
-__attribute__((noreturn)) static void tn_exit(int code) {
-    uint64_t block[2] = {0x20026 /* ADP_Stopped_ApplicationExit */, (uint64_t)code};
-    register uint64_t x0 __asm__("x0") = 0x18; /* SYS_EXIT */
-    register uint64_t x1 __asm__("x1") = (uint64_t)block;
-    __asm__ volatile("hlt #0xf000" : : "r"(x0), "r"(x1) : "memory");
-    for (;;) __asm__ volatile("wfe");
-}
-
-void tn_kernel_out_of_memory(void) {
-    tn_out("kernel panic: out of memory\n", 28);
+static void tn_out_of_memory(void) {
+    tn_outf("%s: out of memory (each app has its own heap)\n", tn_cur->app->name);
     tn_exit(71);
 }
 
-extern char __guard_start[], __stack_bottom[];
+/* ---- CPU exceptions: explain what went wrong, then stop the machine ---- */
 
-/* CPU exceptions: explain what went wrong, then stop the machine. */
 void tn_kernel_trap(uint64_t kind, uint64_t esr, uint64_t elr, uint64_t far) {
     uint64_t ec = esr >> 26, fsc = esr & 0x3f;
     bool data = ec == 0x24 || ec == 0x25, code = ec == 0x20 || ec == 0x21;
     bool write = data && (esr & (1 << 6));
     bool permission = (fsc & 0x3c) == 0x0c;
+    uint64_t stacks = (uint64_t)__stacks_start;
+    bool in_guard = far >= stacks && far < stacks + 8 * TN_SLOT && (far - stacks) % TN_SLOT < TN_GUARD;
     const char *what;
-    if ((data || code) && far >= (uint64_t)__guard_start && far < (uint64_t)__stack_bottom)
+    if ((data || code) && in_guard)
         what = "stack overflow";
     else if ((data || code) && far < 0x10000)
         what = "null pointer access";
@@ -461,13 +687,10 @@ void tn_kernel_trap(uint64_t kind, uint64_t esr, uint64_t elr, uint64_t far) {
         what = "access to unmapped memory";
     else
         what = "CPU exception";
-    char msg[200];
-    int n = snprintf(msg, sizeof msg,
-                     "kernel panic: %s (address %llx, at instruction %llx; exception %llu, ESR %llx)\n",
-                     what, (unsigned long long)far, (unsigned long long)elr,
-                     (unsigned long long)kind, (unsigned long long)esr);
-    tn_out(msg, (size_t)n);
-    tn_exit(70);
+    tn_outf("kernel panic: %s (address %llx, at instruction %llx; exception %llu, ESR %llx)\n",
+            what, (unsigned long long)far, (unsigned long long)elr, (unsigned long long)kind,
+            (unsigned long long)esr);
+    tn_halt(70);
 }
 
 /* ---- memory protection: page tables and the MMU ----
@@ -477,8 +700,8 @@ void tn_kernel_trap(uint64_t kind, uint64_t esr, uint64_t elr, uint64_t far) {
  *   0x08000000 - 0x0fffffff  devices (interrupt controller, serial port, ...), uncached
  *   0x40000000 - kernel      unmapped
  *   kernel image             4 KB pages: code RX, constants R, data RW
- *   guard (2 MB)             unmapped: stack overflow faults
- *   stack, heap              RW, never executable, up to the end of RAM */
+ *   stack slots              per slot: 2 MB unmapped guard, then an 8 MB RW stack
+ *   heaps                    RW, never executable, up to the end of RAM */
 
 #define TN_PAGE 0x1000ULL
 #define TN_BLOCK_2M 0x200000ULL
@@ -495,6 +718,7 @@ void tn_kernel_trap(uint64_t kind, uint64_t esr, uint64_t elr, uint64_t far) {
 #define TN_D_UXN (1ULL << 54)  /* never executable by user code */
 #define TN_D_NORMAL ((1ULL << 2) | TN_D_INNER | TN_D_AF) /* MAIR attribute 1 */
 #define TN_D_DEVICE ((0ULL << 2) | TN_D_AF | TN_D_PXN | TN_D_UXN) /* attribute 0 */
+#define TN_D_DATA (TN_D_NORMAL | TN_D_PXN | TN_D_UXN | TN_D_BLOCK)
 
 static uint64_t tn_l1[512] __attribute__((aligned(4096)));
 static uint64_t tn_l2_low[512] __attribute__((aligned(4096)));
@@ -502,6 +726,7 @@ static uint64_t tn_l2_ram[512] __attribute__((aligned(4096)));
 static uint64_t tn_l3[TN_L3_TABLES][512] __attribute__((aligned(4096)));
 
 extern char __text_start[], __text_end[], __rodata_end[], __image_end[];
+
 static void tn_mmu_on(void) {
     for (uint64_t a = 0x08000000; a < 0x10000000; a += TN_BLOCK_2M)
         tn_l2_low[a / TN_BLOCK_2M] = a | TN_D_DEVICE | TN_D_BLOCK;
@@ -512,7 +737,7 @@ static void tn_mmu_on(void) {
     uint64_t tables = (image_end - TN_RAM) / TN_BLOCK_2M;
     if (tables > TN_L3_TABLES) {
         tn_out("kernel panic: the kernel image is too large to map\n", 51);
-        tn_exit(72);
+        tn_halt(72);
     }
     for (uint64_t a = text; a < image_end; a += TN_PAGE) {
         uint64_t i = (a - TN_RAM) / TN_PAGE, attr;
@@ -522,8 +747,12 @@ static void tn_mmu_on(void) {
         tn_l3[i / 512][i % 512] = a | attr | TN_D_PAGE;
     }
     for (uint64_t t = 0; t < tables; t++) tn_l2_ram[t] = (uint64_t)tn_l3[t] | TN_D_TABLE;
-    for (uint64_t a = (uint64_t)__stack_bottom; a < (uint64_t)__heap_end; a += TN_BLOCK_2M)
-        tn_l2_ram[(a - TN_RAM) / TN_BLOCK_2M] = a | TN_D_NORMAL | TN_D_PXN | TN_D_UXN | TN_D_BLOCK;
+    uint64_t stacks = (uint64_t)__stacks_start;
+    for (uint64_t s = 0; s < 8; s++)
+        for (uint64_t a = stacks + s * TN_SLOT + TN_GUARD; a < stacks + (s + 1) * TN_SLOT; a += TN_BLOCK_2M)
+            tn_l2_ram[(a - TN_RAM) / TN_BLOCK_2M] = a | TN_D_DATA;
+    for (uint64_t a = (uint64_t)__heap_start; a < (uint64_t)__heap_end; a += TN_BLOCK_2M)
+        tn_l2_ram[(a - TN_RAM) / TN_BLOCK_2M] = a | TN_D_DATA;
     tn_l1[1] = (uint64_t)tn_l2_ram | TN_D_TABLE;
 
     uint64_t mmfr0;
@@ -582,9 +811,6 @@ static void tn_selftest(int which) {
 #define TN_GICC ((volatile uint32_t *)0x08010000)   /* CPU interface */
 #define TN_IRQ_TIMER 27                             /* EL1 virtual timer (a PPI) */
 #define TN_IRQ_UART 33                              /* PL011 serial port (SPI 1) */
-#define TN_HZ 100                                   /* timer ticks per second */
-
-static volatile uint64_t tn_irq_ticks; /* timer interrupts handled */
 
 static void tn_timer_arm(void) {
     uint64_t interval = tn_tick_freq() / TN_HZ;
@@ -595,7 +821,7 @@ void tn_kernel_irq(void) {
     uint32_t iar = TN_GICC[0x00c / 4]; /* acknowledge */
     uint32_t id = iar & 0x3ff;
     if (id == TN_IRQ_TIMER) {
-        tn_irq_ticks++;
+        if (tn_cur && tn_cur->state == TN_READY) tn_cur->cpu_ticks++;
         tn_timer_arm();
     } else if (id == TN_IRQ_UART) {
         /* Reading a character clears its interrupt. (Clearing it by hand afterwards
@@ -603,6 +829,7 @@ void tn_kernel_irq(void) {
         tn_uart_drain();
     }
     if (id < 1020) TN_GICC[0x010 / 4] = iar; /* end of interrupt */
+    if (id == TN_IRQ_TIMER || id == TN_IRQ_UART) tn_preempt();
 }
 
 static void tn_interrupts_on(void) {
@@ -619,6 +846,8 @@ static void tn_interrupts_on(void) {
     tn_irqs_on();
 }
 
+/* ---- boot: protection, interrupts, then start the apps ---- */
+
 void tn_kernel_boot(void) {
 #ifndef TN_NO_MMU /* GLYPH_KERNEL_CFLAGS=-DTN_NO_MMU: run without protection or caches */
     tn_mmu_on();
@@ -627,8 +856,21 @@ void tn_kernel_boot(void) {
 #ifdef TN_SELFTEST
     tn_selftest(TN_SELFTEST);
 #endif
-    tn_kernel_main();
+    tn_irqs_off();
+    tn_ntasks = tn_app_count < TN_MAX_APPS ? tn_app_count : TN_MAX_APPS;
+    uint64_t heap = (uint64_t)__heap_start;
+    uint64_t share = (((uint64_t)__heap_end - heap) / (uint64_t)tn_ntasks) & ~(uint64_t)15;
+    for (int i = 0; i < tn_ntasks; i++) {
+        tn_task *t = &tn_tasks[i];
+        t->app = &tn_apps[i];
+        t->state = TN_READY;
+        t->heap.top = (char *)(heap + (uint64_t)i * share);
+        t->heap.end = t->heap.top + share;
+        /* Slot i + 1: the stack grows down from the top of the slot. */
+        t->ctx.r[11] = (uint64_t)&tn_task_start; /* x30: where tn_switch returns to */
+        t->ctx.r[12] = (uint64_t)__stacks_start + (uint64_t)(i + 2) * TN_SLOT; /* sp */
+    }
+    tn_run(&tn_tasks[0]);
 }
 
-/* ---- end of kernel platform ---- */
-
+/* ---- end of kernel ---- */

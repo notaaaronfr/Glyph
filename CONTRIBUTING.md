@@ -27,7 +27,9 @@ src/
   interp.rs    tree-walking interpreter (glyph run, glyph test)
   codegen.rs   native compiler: syntax tree → C
   runtime.c    small C runtime embedded in every native executable
-  kernel.c     bare-metal platform for `--target kernel`: boot, allocator, serial, timer
+  kernel.c     Glyph OS kernel for `--target kernel`: boot, MMU, interrupts, scheduler,
+               per-app heaps, serial port, timer
+  kernel_api.h what the kernel provides to apps (each app is compiled against it)
   error.rs     diagnostics (human-readable and JSON)
   fix.rs       `glyph fix`: AI repair loop, its guard rails, and the Claude API client
   main.rs      command-line interface

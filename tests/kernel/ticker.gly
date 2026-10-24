@@ -1,0 +1,7 @@
+# Ticks three times. With preemption, this finishes while the spinner still computes.
+fn main() uses io, time {
+  for i in range(3) {
+    sleep(20)
+    print("ticker:", i + 1)
+  }
+}

@@ -1,0 +1,11 @@
+# Computes for a while without ever pausing (no sleep, no input).
+fn fib(n: Int) -> Int {
+  if n < 2 { return n }
+  return fib(n - 1) + fib(n - 2)
+}
+
+fn main() uses io {
+  print("spinner: started")
+  print("spinner: fib(32) =", fib(32))
+  print("spinner: done")
+}

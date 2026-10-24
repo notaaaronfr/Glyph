@@ -199,7 +199,36 @@ save.gly:1:16: effect error: `save` uses effect `fs`, which the kernel target do
   hint: the kernel target provides: io, time, rand
 ```
 
-This is the first step toward the vision of an OS that enforces effects as permissions. There's also a small interactive shell, [examples/kernel/shell.gly](examples/kernel/shell.gly), with `help`, `echo`, `fib`, `sum`, `uptime` and `exit`.
+This is the first step toward the vision of an OS that enforces effects as permissions.
+
+### Several apps at once
+
+Give `run` several files and each becomes an app, running at the same time:
+
+```
+$ glyph run counter.gly clock.gly busy.gly crasher.gly --target kernel
+counter: 1
+busy: fib(28) = 317811
+...
+crasher.gly:12:15: contract error: precondition of `withdraw` violated: `amount <= balance`
+[Glyph OS: app crasher stopped with exit code 1; the other apps keep running]
+counter: 5
+clock: 919 ms
+counter: done
+Glyph OS: all 4 apps finished
+  counter      exit 0   cpu 0 ms   uses io, time
+  clock        exit 0   cpu 0 ms   uses io, time
+  busy         exit 0   cpu 200 ms   uses io
+  crasher      exit 1   cpu 0 ms   uses io, time
+```
+
+- **Isolated.** Each app has its own stack, with a guard region below it, and its own heap. Apps are compiled separately, so they share no memory, not even runtime state.
+- **Preemptive.** The timer interrupt switches apps every 10 ms, so an app that computes without pausing can't freeze the others.
+- **Efficient waiting.** Apps in `sleep` or `input` are parked; when nothing is ready, the CPU idles.
+- **Crash isolation.** An app that fails a contract, divides by zero or runs out of memory stops alone. The machine powers off when every app has finished, with the first failing app's exit code.
+- **Whole lines.** Each `print` comes out in one piece, so output from different apps never mixes mid-line.
+
+The demo apps are in [examples/kernel/apps](examples/kernel/apps). Up to 7 apps can run at once. There's also a small interactive shell, [examples/kernel/shell.gly](examples/kernel/shell.gly), with `help`, `echo`, `fib`, `sum`, `uptime` and `exit`.
 
 To use the kernel target you need QEMU, clang and lld: `brew install qemu llvm lld` on macOS, or `apt install qemu-system-arm clang lld` on Debian or Ubuntu. CI boots the kernel on every change.
 
@@ -230,7 +259,7 @@ GLYPH_MEMSTATS=1 glyph run app.gly --native
 # glyph memstats: 1415650 allocated, 1415650 freed, 0 live at exit, peak 40023 live
 ```
 
-## Language reference (v0.11)
+## Language reference (v0.12)
 
 | Feature | Syntax |
 |---|---|
@@ -332,7 +361,8 @@ Glyph is **early and experimental**: expect breaking changes.
 - [x] Glyph runs on bare metal (`--target kernel`): boots in QEMU, serial I/O, timer, kernel heap
 - [x] Memory protection on the kernel: MMU, caches, read-only code, no-execute data, null and stack guards
 - [x] Interrupts on the kernel: GIC, 100 Hz timer tick, interrupt-driven serial input, `sleep` that idles the CPU
-- [ ] Glyph OS next steps: running several programs (tasks and a scheduler), a device driver interface, effects enforced as permissions per program
+- [x] Several apps at once: preemptive scheduler, per-app stacks and heaps, crash isolation
+- [ ] Glyph OS next steps: effects enforced as permissions per app by the kernel, messages between apps, a device driver interface, per-app address spaces
 - [ ] The north star: **Glyph OS**, where the kernel enforces effects as permissions
 
 See [VISION.md](VISION.md) for the full picture.

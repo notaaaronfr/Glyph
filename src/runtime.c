@@ -766,14 +766,18 @@ static tn_enum *tn_try_parse_int(tn_str *s, const tn_type *opt) {
 
 /* ---- effects ---- */
 
-/* Takes ownership of the parts. */
+/* Takes ownership of the parts. The line goes out in one piece, so on Glyph OS
+ * another app's output can't land in the middle of it. */
 static tn_unit tn_print(int n, tn_str **parts) {
+    tn_sb b = {0};
     for (int i = 0; i < n; i++) {
-        if (i) tn_out(" ", 1);
-        tn_out(parts[i]->data, parts[i]->len);
+        if (i) tn_sb_put(&b, " ", 1);
+        tn_sb_put(&b, parts[i]->data, parts[i]->len);
         tn_drop(parts[i]);
     }
-    tn_out("\n", 1);
+    tn_sb_put(&b, "\n", 1);
+    tn_out(b.p, b.len);
+    free(b.p);
     return 0;
 }
 

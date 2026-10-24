@@ -239,11 +239,17 @@ fn tests_inside_imported_modules_run() {
 /// port. Returns None (the test is skipped) if QEMU or a bare-metal clang is missing,
 /// unless GLYPH_REQUIRE_KERNEL is set, as in CI.
 fn boot(file: &str, input: &str) -> Option<String> {
-    boot_with(file, input, "")
+    boot_apps(&[file], input, "")
 }
 
 /// Like `boot`, with extra C flags for the kernel build (GLYPH_KERNEL_CFLAGS).
 fn boot_with(file: &str, input: &str, cflags: &str) -> Option<String> {
+    boot_apps(&[file], input, cflags)
+}
+
+/// Boots Glyph OS with several apps at once.
+fn boot_apps(files: &[&str], input: &str, cflags: &str) -> Option<String> {
+    let file = files.join(" ");
     use std::io::Write;
     let have = |cmd: &str| {
         Command::new(cmd)
@@ -269,7 +275,9 @@ fn boot_with(file: &str, input: &str, cflags: &str) -> Option<String> {
         return None;
     }
     let mut child = Command::new(env!("CARGO_BIN_EXE_glyph"))
-        .args(["run", file, "--target", "kernel"])
+        .arg("run")
+        .args(files)
+        .args(["--target", "kernel"])
         .env("GLYPH_KERNEL_CFLAGS", cflags)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .stdin(std::process::Stdio::piped())
@@ -425,4 +433,57 @@ fn kernel_timer_interrupts_wake_sleep() {
     assert!(out.contains("tick 3"), "{}", out);
     assert!(out.contains("slept at least 300 ms: true"), "{}", out);
     assert!(out.contains("and not much longer: true"), "{}", out);
+}
+
+/// The spinner never pauses; only preemption by the timer lets the ticker run before
+/// it finishes.
+#[test]
+fn kernel_preempts_apps_that_never_pause() {
+    let apps = ["tests/kernel/spinner.gly", "tests/kernel/ticker.gly"];
+    let Some(out) = boot_apps(&apps, "", "") else {
+        return;
+    };
+    assert!(out.starts_with("exit: 0"), "{}", out);
+    let at = |s: &str| {
+        out.find(s)
+            .unwrap_or_else(|| panic!("no {:?} in:\n{}", s, out))
+    };
+    assert!(
+        at("ticker: 3") < at("spinner: done"),
+        "no preemption:\n{}",
+        out
+    );
+    assert!(at("spinner: started") < at("ticker: 1"), "{}", out);
+    assert!(out.contains("spinner: fib(32) = 2178309"), "{}", out);
+    assert!(out.contains("Glyph OS: all 2 apps finished"), "{}", out);
+}
+
+/// One app failing stops only that app.
+#[test]
+fn kernel_isolates_a_crashing_app() {
+    let apps = [
+        "examples/kernel/apps/crasher.gly",
+        "examples/kernel/apps/counter.gly",
+    ];
+    let Some(out) = boot_apps(&apps, "", "") else {
+        return;
+    };
+    assert!(out.starts_with("exit: 1"), "{}", out);
+    assert!(
+        out.contains("precondition of `withdraw` violated"),
+        "{}",
+        out
+    );
+    assert!(
+        out.contains("app crasher stopped with exit code 1"),
+        "{}",
+        out
+    );
+    let at = |s: &str| {
+        out.find(s)
+            .unwrap_or_else(|| panic!("no {:?} in:\n{}", s, out))
+    };
+    assert!(at("app crasher stopped") < at("counter: done"), "{}", out);
+    assert!(out.contains("crasher      exit 1"), "{}", out);
+    assert!(out.contains("counter      exit 0"), "{}", out);
 }

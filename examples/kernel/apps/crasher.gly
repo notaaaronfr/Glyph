@@ -1,0 +1,15 @@
+# Breaks a contract partway through. Only this app stops; the others keep running.
+fn withdraw(balance: Int, amount: Int) -> Int
+  requires amount <= balance
+{
+  return balance - amount
+}
+
+fn main() uses io, time {
+  let balance = 100
+  for amount in [30, 50, 40] {
+    sleep(250)
+    balance = withdraw(balance, amount)
+    print("crasher: balance is now", balance)
+  }
+}

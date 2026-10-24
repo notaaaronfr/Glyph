@@ -1,0 +1,12 @@
+# Computes without ever pausing. The timer interrupt still switches the CPU to the
+# other apps, so their output keeps appearing while this runs (preemption).
+fn fib(n: Int) -> Int {
+  if n < 2 { return n }
+  return fib(n - 1) + fib(n - 2)
+}
+
+fn main() uses io {
+  for n in [28, 29, 30, 31] {
+    print("busy: fib(" + str(n) + ") =", fib(n))
+  }
+}

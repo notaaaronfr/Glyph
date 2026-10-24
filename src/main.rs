@@ -13,9 +13,10 @@ use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
 
 const USAGE: &str = "\
-Glyph 0.11 - a language AI can write and humans can trust
+Glyph 0.12 - a language AI can write and humans can trust
 
 usage: glyph <command> <file.gly> [options]
+       glyph run <app.gly>... --target kernel     (several apps at once on Glyph OS)
 
 commands:
   run       check the program, then run its `main` function
@@ -43,6 +44,8 @@ options:
 struct Opts {
     cmd: String,
     file: String,
+    /// All files given; more than one only for Glyph OS (several apps).
+    files: Vec<String>,
     json: bool,
     native: bool,
     emit_c: bool,
@@ -100,15 +103,21 @@ fn parse_args() -> Opts {
             _ => positional.push(a),
         }
     }
-    if positional.len() != 2 {
+    if positional.len() < 2 {
         eprint!("{}", USAGE);
         exit(2);
     }
-    let file = positional.pop().unwrap();
-    let cmd = positional.pop().unwrap();
+    let cmd = positional.remove(0);
+    let files = positional;
+    let file = files[0].clone();
+    if files.len() > 1 && !(target == codegen::Target::Kernel && (cmd == "run" || cmd == "build")) {
+        eprintln!("several files can only be given to `run` or `build` with `--target kernel`, as apps for Glyph OS");
+        exit(2);
+    }
     Opts {
         cmd,
         file,
+        files,
         json,
         native,
         emit_c,
@@ -156,6 +165,9 @@ fn run(o: &Opts, src: &str) -> i32 {
     // `fix` runs on broken files too, so it comes before the checks below.
     if o.cmd == "fix" {
         return fix::run(file, src, &o.fix);
+    }
+    if o.target == codegen::Target::Kernel && (o.cmd == "run" || o.cmd == "build") {
+        return glyph_os(o);
     }
     let (prog, sources, mut errs) = match loader::load(file, src) {
         Ok(l) => (l.program, l.sources, l.errors),
@@ -221,25 +233,18 @@ fn run(o: &Opts, src: &str) -> i32 {
                 print!("{}", c);
                 return 0;
             }
-            let kernel = o.target == codegen::Target::Kernel;
             let out = PathBuf::from(o.out.clone().unwrap_or_else(|| {
                 Path::new(file)
-                    .with_extension(if kernel { "elf" } else { "" })
+                    .with_extension("")
                     .to_string_lossy()
                     .into_owned()
             }));
-            match compile_for(o.target, &c, &out) {
+            match compile_c(&c, &out) {
                 Ok(()) => {
                     if json {
                         println!(
                             "{{\"ok\":true,\"output\":{}}}",
                             json_str(&out.to_string_lossy())
-                        );
-                    } else if kernel {
-                        eprintln!(
-                            "built {} (kernel image; run it with `glyph run {} --target kernel`)",
-                            out.display(),
-                            file
                         );
                     } else {
                         eprintln!("built {} (native)", out.display());
@@ -252,7 +257,7 @@ fn run(o: &Opts, src: &str) -> i32 {
                 }
             }
         }
-        "run" if o.native || o.target == codegen::Target::Kernel => {
+        "run" if o.native => {
             let c = match codegen::emit_c(&prog, &types, &sources, o.target) {
                 Ok(c) => c,
                 Err(e) => {
@@ -261,14 +266,11 @@ fn run(o: &Opts, src: &str) -> i32 {
                 }
             };
             let exe = std::env::temp_dir().join(format!("glyph-run-{}", std::process::id()));
-            if let Err(msg) = compile_for(o.target, &c, &exe) {
+            if let Err(msg) = compile_c(&c, &exe) {
                 eprintln!("error: {}", msg);
                 return 1;
             }
-            let status = match o.target {
-                codegen::Target::Hosted => Command::new(&exe).status(),
-                codegen::Target::Kernel => qemu(&exe).status(),
-            };
+            let status = Command::new(&exe).status();
             let _ = std::fs::remove_file(&exe);
             match status {
                 Ok(s) => s.code().unwrap_or(1),
@@ -351,10 +353,124 @@ fn run(o: &Opts, src: &str) -> i32 {
     }
 }
 
-fn compile_for(target: codegen::Target, c: &str, out: &Path) -> Result<(), String> {
-    match target {
-        codegen::Target::Hosted => compile_c(c, out),
-        codegen::Target::Kernel => compile_kernel(c, out),
+const KERNEL: &str = include_str!("kernel.c");
+const KERNEL_API: &str = include_str!("kernel_api.h");
+const MAX_APPS: usize = 7;
+
+/// `run` / `build` with `--target kernel`: each file is an app; they are compiled
+/// separately and linked with the kernel into one bootable image.
+fn glyph_os(o: &Opts) -> i32 {
+    if o.files.len() > MAX_APPS {
+        eprintln!("error: Glyph OS runs at most {} apps at once", MAX_APPS);
+        return 2;
+    }
+    let mut units = vec![];
+    let mut table = vec![];
+    let mut decls = String::new();
+    for (i, file) in o.files.iter().enumerate() {
+        let src = match std::fs::read_to_string(file) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("error: cannot read {}: {}", file, e);
+                return 2;
+            }
+        };
+        let (prog, sources, mut errs) = match loader::load(file, &src) {
+            Ok(l) => (l.program, l.sources, l.errors),
+            Err((errs, sources)) => {
+                report(&errs, &sources, o.json);
+                return 1;
+            }
+        };
+        let checked = check::check(&prog);
+        if let Err(more) = &checked {
+            errs.extend(more.iter().cloned());
+        }
+        if !errs.is_empty() {
+            report(&errs, &sources, o.json);
+            return 1;
+        }
+        let c = match codegen::emit_c(&prog, &checked.expect("no errors"), &sources, o.target) {
+            Ok(c) => c,
+            Err(e) => {
+                report(&[e], &sources, o.json);
+                return 1;
+            }
+        };
+        units.push(format!(
+            "#define TN_APP_ENTRY tn_app_main_{}
+{}",
+            i, c
+        ));
+        let name = Path::new(file)
+            .file_stem()
+            .map_or("app".into(), |s| s.to_string_lossy().into_owned());
+        let effects: Vec<&str> = prog
+            .funcs
+            .iter()
+            .find(|f| f.name == "main")
+            .map(|m| m.effects.iter().map(|e| e.0.as_str()).collect())
+            .unwrap_or_default();
+        let effects = if effects.is_empty() {
+            "nothing".to_string()
+        } else {
+            effects.join(", ")
+        };
+        decls += &format!("void tn_app_main_{}(void);\n", i);
+        table.push(format!("{{{:?}, tn_app_main_{}, {:?}}}", name, i, effects));
+    }
+    let kernel = format!(
+        "{}{}\n{}const tn_app tn_apps[] = {{{}}};\nconst int tn_app_count = {};\n",
+        KERNEL_API,
+        KERNEL,
+        decls,
+        table.join(", "),
+        table.len()
+    );
+    units.insert(0, kernel);
+
+    let image = if o.cmd == "build" {
+        PathBuf::from(o.out.clone().unwrap_or_else(|| {
+            Path::new(&o.file)
+                .with_extension("elf")
+                .to_string_lossy()
+                .into_owned()
+        }))
+    } else {
+        std::env::temp_dir().join(format!("glyph-os-{}.elf", std::process::id()))
+    };
+    if let Err(msg) = compile_kernel(&units, &image) {
+        eprintln!("error: {}", msg);
+        return 1;
+    }
+    if o.cmd == "build" {
+        let run = format!("glyph run {} --target kernel", o.files.join(" "));
+        if o.json {
+            println!(
+                "{{\"ok\":true,\"output\":{}}}",
+                json_str(&image.to_string_lossy())
+            );
+        } else {
+            eprintln!(
+                "built {} (Glyph OS image with {} app(s); run it with `{}`)",
+                image.display(),
+                o.files.len(),
+                run
+            );
+        }
+        return 0;
+    }
+    let status = qemu(&image).status();
+    let _ = std::fs::remove_file(&image);
+    match status {
+        Ok(s) => s.code().unwrap_or(1),
+        Err(e) => {
+            eprintln!(
+                "error: cannot start QEMU: {} (install it with `brew install qemu`)",
+                e
+            );
+            1
+        }
     }
 }
 
@@ -379,11 +495,9 @@ SECTIONS {
   __bss_end = .;
   . = ALIGN(0x200000);
   __image_end = .;
-  __guard_start = .;
-  . += 0x200000;
-  __stack_bottom = .;
-  . += 0x1000000;
-  __stack_top = .;
+  __stacks_start = .;
+  __stack_top = . + 0xa00000;
+  . += 0x5000000;
   __heap_start = .;
   __heap_end = 0x50000000;
 }
@@ -404,13 +518,17 @@ fn kernel_cc() -> String {
     .map_or_else(|| "clang".to_string(), |p| p.to_string())
 }
 
-/// Compiles a kernel image (an ELF file QEMU can boot) with clang and lld.
-fn compile_kernel(c: &str, out: &Path) -> Result<(), String> {
+/// Compiles a kernel image (an ELF file QEMU can boot) from C files with clang and lld.
+fn compile_kernel(units: &[String], out: &Path) -> Result<(), String> {
     let tmp = std::env::temp_dir();
     let id = std::process::id();
-    let c_file = tmp.join(format!("glyph-kernel-{}.c", id));
+    let mut c_files = vec![];
+    for (i, c) in units.iter().enumerate() {
+        let f = tmp.join(format!("glyph-kernel-{}-{}.c", id, i));
+        std::fs::write(&f, c).map_err(|e| format!("cannot write {}: {}", f.display(), e))?;
+        c_files.push(f);
+    }
     let ld_file = tmp.join(format!("glyph-kernel-{}.ld", id));
-    std::fs::write(&c_file, c).map_err(|e| format!("cannot write {}: {}", c_file.display(), e))?;
     std::fs::write(&ld_file, KERNEL_LINKER_SCRIPT)
         .map_err(|e| format!("cannot write {}: {}", ld_file.display(), e))?;
     let cc = kernel_cc();
@@ -434,9 +552,11 @@ fn compile_kernel(c: &str, out: &Path) -> Result<(), String> {
         )
         .arg("-o")
         .arg(out)
-        .arg(&c_file)
+        .args(&c_files)
         .output();
-    let _ = std::fs::remove_file(&c_file);
+    for f in &c_files {
+        let _ = std::fs::remove_file(f);
+    }
     let _ = std::fs::remove_file(&ld_file);
     match result {
         Err(e) => Err(format!(
@@ -444,7 +564,7 @@ fn compile_kernel(c: &str, out: &Path) -> Result<(), String> {
             cc, e
         )),
         Ok(r) if !r.status.success() => Err(format!(
-            "building the kernel image failed (it needs clang and lld: `brew install llvm lld`):\n{}",
+            "building the kernel image failed (if clang or lld is missing: `brew install llvm lld`):\n{}",
             String::from_utf8_lossy(&r.stderr)
         )),
         Ok(_) => Ok(()),
