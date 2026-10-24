@@ -31,10 +31,12 @@ crates/
   glyph-run/       trusted: the reference semantics
     interp.rs      tree-walking interpreter (glyph run, glyph test)
   glyph-kernel/    trusted for claims about Glyph OS
-    kernel.c       the kernel for `--target kernel`: boot, MMU, interrupts, scheduler,
-                   per-app heaps, serial port, timer, effect permissions
-    kernel_api.h   what the kernel provides to apps (each app is compiled against it)
-    lib.rs         each app's grant table, the boot image build, QEMU
+    kernel.c       the kernel for `--target kernel`: boot, per-app page tables, user
+                   mode, system calls, interrupts, scheduler, effect permissions
+    abi.h          system call numbers and the shared C library's interface
+    libc.c         the stateless C library subset, one copy shared by kernel and apps
+    kernel_api.h   what an app sees: system call stubs and its own heap allocator
+    lib.rs         each app's grant table, the linker script, the image build, QEMU
   glyph-native/    trusted only for claims about native binaries
     codegen.rs     native compiler: syntax tree → C (hosted, or an app for the kernel)
     runtime.c      small C runtime embedded in every native executable and app

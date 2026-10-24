@@ -576,3 +576,63 @@ fn kernel_grant_override_cannot_widen_permissions() {
         .unwrap_or_else(|| panic!("no summary line for busy in:\n{out}"));
     assert!(busy.ends_with("allowed io"), "{out}");
 }
+
+/// Apps run in user mode, each in its own address space: every deliberate attack
+/// (built in with -DTN_USERTEST=n, made by the first app only) must stop that app,
+/// and only that app.
+#[test]
+fn kernel_user_mode_stops_attacks_on_the_kernel_and_other_apps() {
+    let cases = [
+        (
+            1,
+            70,
+            "app clock crashed: touched memory that isn't its own",
+        ), // the serial port
+        (
+            2,
+            70,
+            "app clock crashed: touched memory that isn't its own",
+        ), // kernel memory
+        (
+            3,
+            70,
+            "app clock crashed: used an instruction only the kernel may use",
+        ), // the clock
+        (
+            4,
+            70,
+            "app clock crashed: used an instruction only the kernel may use",
+        ), // masking interrupts
+        (
+            5,
+            77,
+            "denied: app clock asked the kernel to read memory that isn't its own",
+        ),
+        (
+            6,
+            70,
+            "app clock crashed: touched memory that isn't its own",
+        ), // the next app's heap
+        (7, 70, "app clock crashed: write to read-only memory"), // its own code
+    ];
+    let apps = [
+        "examples/kernel/apps/clock.gly",
+        "examples/kernel/apps/counter.gly",
+    ];
+    for (n, code, expected) in cases {
+        let Some(out) = boot_apps(&apps, "", &format!("-DTN_USERTEST={n}")) else {
+            return;
+        };
+        assert!(
+            out.starts_with(&format!("exit: {code}")),
+            "attack {n}:\n{out}"
+        );
+        assert!(
+            out.contains(&format!("[Glyph OS: {expected}")),
+            "attack {n}:\n{out}"
+        );
+        assert!(!out.contains("clock: "), "attack {n}:\n{out}");
+        assert!(!out.contains("kernel panic"), "attack {n}:\n{out}");
+        assert!(out.contains("counter: done"), "attack {n}:\n{out}");
+    }
+}

@@ -232,9 +232,9 @@ Glyph OS: all 4 apps finished
 
 ### Effects are permissions
 
-The kernel grants each app exactly the effects its `main` declares, and checks every service call against them: printing and reading input need `io`, the clock and `sleep` need `time`, and random numbers need `rand`. `busy` above declares only `io`, so the kernel won't let it read the clock. Error reports are always allowed, so an app with no effects can still say why it failed.
+The kernel grants each app exactly the effects its `main` declares, and checks every system call against them: printing and reading input need `io`, the clock and `sleep` need `time`, and random numbers need `rand`. `busy` above declares only `io`, so the kernel won't let it read the clock. Error reports are always allowed, so an app with no effects can still say why it failed.
 
-The compiler already checks that Glyph code never uses an effect it didn't declare. The kernel checks again at run time, so an app whose compiled code was changed still can't get more than it declared through the kernel's services. Apps still run in kernel mode, so code that bypasses those services entirely is not stopped yet; user mode is the next step. The tests simulate exactly that: `GLYPH_KERNEL_GRANT="clock=io"` makes the kernel grant `clock` less than its code uses.
+The compiler already checks that Glyph code never uses an effect it didn't declare. The kernel checks again at run time, so an app whose compiled code was changed still can't get more than it declared. The tests simulate that: `GLYPH_KERNEL_GRANT="clock=io"` makes the kernel grant `clock` less than its code uses.
 
 ```
 $ GLYPH_KERNEL_GRANT="clock=io" glyph run counter.gly clock.gly --target kernel
@@ -245,7 +245,30 @@ counter: 2
 ...
 ```
 
-The limit today: apps still run at the kernel's privilege level, in one address space, so code that skipped the kernel's services and touched the hardware directly wouldn't be checked. Running apps in user mode (EL0), with system calls and their own page tables, closes that gap and is the next step.
+The override can only take effects away: no setting of it grants an app an effect its `main` doesn't declare.
+
+### User mode: apps can't get around the kernel
+
+Apps run in user mode (EL0, the CPU's unprivileged level), each in its own address space. An app's page tables open only its own code, data, stack and heap to it; the kernel, the devices and every other app are out of reach. It can't mask interrupts or read the timer itself either. Everything else goes through system calls (`svc`), and the kernel checks each one: the effect it needs, and that every pointer the app passes points into the app's own memory. So the permission checks can't be skipped by code that goes straight to the hardware.
+
+A fault in an app (a stray pointer, a stack overflow) stops that app, not the machine. The tests attack the kernel from user mode on purpose (built in with `GLYPH_KERNEL_CFLAGS=-DTN_USERTEST=1` through `7`), and each attack stops only the attacker:
+
+| Attack from an app | What happens |
+| --- | --- |
+| Write to the serial port's registers | Fault: device memory isn't the app's |
+| Read kernel memory | Fault |
+| Read another app's heap | Fault |
+| Overwrite its own code | Fault: code is read-only |
+| Read the CPU's counter directly, or mask interrupts | Trapped: kernel-only instructions |
+| Ask the kernel to print kernel memory | Denied: the pointer isn't the app's |
+
+```
+[Glyph OS: app clock crashed: touched memory that isn't its own (the kernel's, a device's or another app's), at address 40080000, instruction 400dc00c (ESR 9200000f)]
+[Glyph OS: app clock stopped with exit code 70; the other apps keep running]
+counter: 4
+```
+
+What this doesn't cover yet: the kernel itself is trusted, apps share the one CPU core, and an app can still use all of its own time slice and memory.
 
 The demo apps are in [examples/kernel/apps](examples/kernel/apps). Up to 7 apps can run at once. There's also a small interactive shell, [examples/kernel/shell.gly](examples/kernel/shell.gly), with `help`, `echo`, `fib`, `sum`, `uptime` and `exit`.
 
@@ -278,7 +301,7 @@ GLYPH_MEMSTATS=1 glyph run app.gly --native
 # glyph memstats: 1415650 allocated, 1415650 freed, 0 live at exit, peak 40023 live
 ```
 
-## Language reference (v0.13)
+## Language reference (v0.14)
 
 | Feature | Syntax |
 |---|---|
@@ -382,7 +405,8 @@ Glyph is **early and experimental**: expect breaking changes.
 - [x] Interrupts on the kernel: GIC, 100 Hz timer tick, interrupt-driven serial input, `sleep` that idles the CPU
 - [x] Several apps at once: preemptive scheduler, per-app stacks and heaps, crash isolation
 - [x] Effects as permissions: the kernel grants each app what its `main` declares and stops an app that asks for more
-- [ ] Glyph OS next steps: apps in user mode (EL0) with system calls and per-app address spaces, messages between apps, a device driver interface
+- [x] User mode: apps run at EL0 in their own address spaces and reach the kernel only through checked system calls; a faulting app stops alone
+- [ ] Glyph OS next steps: messages between apps, a device driver interface
 - [ ] **Glyph OS** as a whole system where every program's effects are declared, checked by the compiler and enforced by the kernel. [VISION.md](VISION.md#glyph-os-a-shipped-track-held-to-the-gate) says how OS work is ordered
 
 The phased plan, with an exit test for every phase, is in [VISION.md](VISION.md#roadmap).

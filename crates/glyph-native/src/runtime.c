@@ -11,7 +11,7 @@
 
 #ifndef TN_KERNEL
 /* ---- hosted platform: a normal operating system with a C library ----
- * (The kernel platform, kernel.c, provides the same functions on bare metal.) */
+ * (On Glyph OS, kernel_api.h provides the same functions, as system calls.) */
 #include <errno.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -830,7 +830,11 @@ static tn_unit tn_write_file(tn_str *path, tn_str *content, tn_loc at) {
 }
 static int64_t tn_now(void) { return (int64_t)(tn_ticks() / (tn_tick_freq() / 1000)); }
 /* Seeded on first use (see tn_random), so apps without `rand` never ask for it. */
-static void tn_init(void) {}
+static void tn_init(void) {
+#ifdef TN_USERTEST
+    tn_usertest(TN_USERTEST);
+#endif
+}
 #else
 static tn_str *tn_read_file(tn_str *path, tn_loc at) {
     FILE *f = fopen(path->data, "rb");

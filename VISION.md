@@ -89,7 +89,8 @@ Without the last `ensures`, `return []` would satisfy the contract. `glyph spec 
 | Interpreter and native output identical | [v0.7] on the snapshot suite | Byte-identical output on every program in `tests/cases` | Tested, not proved. G7 (`int` whitespace and string quoting) was a divergence until P0a |
 | Reference counting with in-place reuse, ASan in CI | [v0.7] | No use-after-free or double free on the memory suite | `runtime.c` is trusted for native claims |
 | Glyph OS: bare metal, MMU, interrupts, several isolated apps with preemptive scheduling | [v0.9] to [v0.12] | Apps boot and run on QEMU's AArch64 `virt` machine, each with its own heap | A5. Tested in QEMU in CI, not proved |
-| Glyph OS enforces declared effects as permissions | [v0.13] | The kernel grants each app the effects its `main` declares and refuses the rest | A2, A5. Apps still run in kernel mode, so code that skips the kernel API is not stopped (user mode is the next OS step). The grant table is built by trusted code from the checked program, and a test override in that code, `GLYPH_KERNEL_GRANT`, can change it |
+| Glyph OS enforces declared effects as permissions | [v0.13] | The kernel grants each app the effects its `main` declares and refuses the rest | A2, A5. The grant table is built by trusted code from the checked program; a test override in that code, `GLYPH_KERNEL_GRANT`, can only narrow it [v0.14] |
+| Glyph OS apps run in user mode, each in its own address space | [v0.14] | An app touches only its own code, data, stack and heap, reaches the kernel only through system calls whose pointers are checked, and a fault stops only that app | A5. Tested by seven deliberate attacks in QEMU, not proved; the kernel itself is trusted |
 | `glyph fix` guard | [v0.7], **known bypassable** | Rejects added effects and edited contract or test text | G1 to G4 and G6 bypass it. Replaced by `glyph accept` [P0] |
 | Spec and impl units, content identities, acceptance records | [P0b] | Spec parts come only from spec units; literals are exact; no spec unit means no acceptance | A2, A8 |
 | Candidates run against a virtual world under fuel, in a child process | [P0b] | No effect outside the virtual world; infinite loops end as `exhausted` | A1, A5 |
@@ -278,14 +279,14 @@ Each phase ends when `scripts/exit/pN.sh` exits 0.
 
 Glyph OS is where effects stop being a compiler promise and become permissions the machine enforces. An app whose signature says `uses io` cannot read the clock, because the kernel grants exactly what the signature states. Oberon, Singularity and Midori showed that a language and an operating system designed together can be safer than either alone.
 
-It already runs. Since v0.9 Glyph programs boot on bare metal (`--target kernel`), and the compiler refuses effects the target cannot provide [v0.9]. The kernel protects memory with the MMU [v0.10], is driven by interrupts [v0.11], runs several isolated apps with preemptive scheduling [v0.12], and enforces each app's declared effects as permissions [v0.13].
+It already runs. Since v0.9 Glyph programs boot on bare metal (`--target kernel`), and the compiler refuses effects the target cannot provide [v0.9]. The kernel protects memory with the MMU [v0.10], is driven by interrupts [v0.11], runs several isolated apps with preemptive scheduling [v0.12], and enforces each app's declared effects as permissions [v0.13], and runs apps in user mode, each in its own address space [v0.14].
 
 The kernel is the dynamic wall for code that runs on Glyph OS, so it is held to the same rules as the rest of the trusted base.
 
 - **It is trusted code.** `glyph-kernel` holds the kernel, the app ABI and the code that turns checked signatures into its grant table. It counts toward M10, and changes to it follow the trusted-base governance below.
 - **Grants come from the same source as acceptance.** The kernel's grant table is derived from the checked program, the same signatures `glyph accept` reads. From P3, capabilities reach the kernel the way effects do now.
-- **Every claim carries a label and an assumption**, as in the trust table. "Enforces effects" means today what the table says, including that apps still run in kernel mode.
-- **Order.** Hardening what the kernel already promises may proceed in parallel with P0b to P2. That is the next step upstream named: user mode and separate address spaces, so enforcement holds against code that skips the kernel. New OS surface, such as messages between apps and drivers, waits until P2 ships. Each OS milestone ends in an exit script, like every phase.
+- **Every claim carries a label and an assumption**, as in the trust table. "Enforces effects" means today what the table says.
+- **Order.** Hardening what the kernel already promises may proceed in parallel with P0b to P2. User mode and separate address spaces [v0.14] were that step, so enforcement holds against code that skips the kernel; `scripts/exit/os-user-mode.sh` is its exit script. New OS surface, such as messages between apps and drivers, waits until P2 ships. Each OS milestone ends in an exit script, like every phase.
 
 ## Governance of the trusted base
 

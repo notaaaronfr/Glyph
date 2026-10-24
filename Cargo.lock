@@ -89,7 +89,7 @@ dependencies = [
 
 [[package]]
 name = "glyph"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "glyph-front",
  "glyph-kernel",
@@ -101,18 +101,18 @@ dependencies = [
 
 [[package]]
 name = "glyph-front"
-version = "0.13.0"
+version = "0.14.0"
 
 [[package]]
 name = "glyph-kernel"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "glyph-front",
 ]
 
 [[package]]
 name = "glyph-native"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "glyph-front",
  "glyph-kernel",
@@ -120,7 +120,7 @@ dependencies = [
 
 [[package]]
 name = "glyph-run"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "glyph-front",
 ]
