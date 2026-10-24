@@ -1,0 +1,10 @@
+# Uses no effects at all, and breaks a contract: the kernel must still report it.
+fn half(n: Int) -> Int
+  requires n % 2 == 0
+{
+  return n / 2
+}
+
+fn main() {
+  let x = half(7)
+}

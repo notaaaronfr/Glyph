@@ -1,6 +1,6 @@
 [package]
 name = "glyph"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2021"
 description = "Glyph: a language AI can write and humans can trust. Declared effects, contracts, built-in tests, native compiler."
 license = "MIT OR Apache-2.0"

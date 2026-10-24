@@ -87,7 +87,7 @@ static const tn_type TY_i = {TN_INT, 0}, TY_s = {TN_STR, 0}, TY_b = {TN_BOOL, 0}
 static const tn_type TY_li = {TN_LIST, &TY_i}, TY_ls = {TN_LIST, &TY_s};
 
 static int64_t tn_depth = 0;
-static uint64_t tn_rng = 1;
+static uint64_t tn_rng; /* never 0 once seeded */
 
 /* ---- allocation, reference counting ---- */
 
@@ -829,7 +829,8 @@ static tn_unit tn_write_file(tn_str *path, tn_str *content, tn_loc at) {
     tn_fail("runtime", at, "files are not available on the kernel target", NULL);
 }
 static int64_t tn_now(void) { return (int64_t)(tn_ticks() / (tn_tick_freq() / 1000)); }
-static void tn_init(void) { tn_rng = tn_ticks() | 1; }
+/* Seeded on first use (see tn_random), so apps without `rand` never ask for it. */
+static void tn_init(void) {}
 #else
 static tn_str *tn_read_file(tn_str *path, tn_loc at) {
     FILE *f = fopen(path->data, "rb");
@@ -887,6 +888,9 @@ static tn_unit tn_sleep(int64_t ms, tn_loc at) {
 
 static int64_t tn_random(int64_t n, tn_loc at) {
     if (n <= 0) tn_fail("runtime", at, "invalid arguments to `random`: the limit must be positive", NULL);
+#ifdef TN_KERNEL
+    if (tn_rng == 0) tn_rng = tn_random_seed() | 1;
+#endif
     tn_rng ^= tn_rng << 13;
     tn_rng ^= tn_rng >> 7;
     tn_rng ^= tn_rng << 17;

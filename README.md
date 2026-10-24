@@ -199,7 +199,7 @@ save.gly:1:16: effect error: `save` uses effect `fs`, which the kernel target do
   hint: the kernel target provides: io, time, rand
 ```
 
-This is the first step toward the vision of an OS that enforces effects as permissions.
+The kernel also enforces effects at run time; see [Effects are permissions](#effects-are-permissions).
 
 ### Several apps at once
 
@@ -216,10 +216,10 @@ counter: 5
 clock: 919 ms
 counter: done
 Glyph OS: all 4 apps finished
-  counter      exit 0   cpu 0 ms   uses io, time
-  clock        exit 0   cpu 0 ms   uses io, time
-  busy         exit 0   cpu 200 ms   uses io
-  crasher      exit 1   cpu 0 ms   uses io, time
+  counter      exit 0   cpu 0 ms   allowed io, time
+  clock        exit 0   cpu 0 ms   allowed io, time
+  busy         exit 0   cpu 200 ms   allowed io
+  crasher      exit 1   cpu 0 ms   allowed io, time
 ```
 
 - **Isolated.** Each app has its own stack, with a guard region below it, and its own heap. Apps are compiled separately, so they share no memory, not even runtime state.
@@ -227,6 +227,23 @@ Glyph OS: all 4 apps finished
 - **Efficient waiting.** Apps in `sleep` or `input` are parked; when nothing is ready, the CPU idles.
 - **Crash isolation.** An app that fails a contract, divides by zero or runs out of memory stops alone. The machine powers off when every app has finished, with the first failing app's exit code.
 - **Whole lines.** Each `print` comes out in one piece, so output from different apps never mixes mid-line.
+
+### Effects are permissions
+
+The kernel grants each app exactly the effects its `main` declares, and checks every service call against them: printing and reading input need `io`, the clock and `sleep` need `time`, and random numbers need `rand`. `busy` above declares only `io`, so the kernel won't let it read the clock. Error reports are always allowed, so an app with no effects can still say why it failed.
+
+The compiler already guarantees that Glyph code never uses an effect it didn't declare. The kernel checks again at run time, so an app whose compiled code was changed still can't do more than it declared. The tests simulate exactly that: `GLYPH_KERNEL_GRANT="clock=io"` makes the kernel grant `clock` less than its code uses.
+
+```
+$ GLYPH_KERNEL_GRANT="clock=io" glyph run counter.gly clock.gly --target kernel
+counter: 1
+[Glyph OS: denied: app clock tried to read the clock, which needs `time`, but it is only allowed io]
+[Glyph OS: app clock stopped with exit code 77; the other apps keep running]
+counter: 2
+...
+```
+
+The limit today: apps still run at the kernel's privilege level, in one address space, so code that skipped the kernel's services and touched the hardware directly wouldn't be checked. Running apps in user mode (EL0), with system calls and their own page tables, closes that gap and is the next step.
 
 The demo apps are in [examples/kernel/apps](examples/kernel/apps). Up to 7 apps can run at once. There's also a small interactive shell, [examples/kernel/shell.gly](examples/kernel/shell.gly), with `help`, `echo`, `fib`, `sum`, `uptime` and `exit`.
 
@@ -259,7 +276,7 @@ GLYPH_MEMSTATS=1 glyph run app.gly --native
 # glyph memstats: 1415650 allocated, 1415650 freed, 0 live at exit, peak 40023 live
 ```
 
-## Language reference (v0.12)
+## Language reference (v0.13)
 
 | Feature | Syntax |
 |---|---|
@@ -362,8 +379,9 @@ Glyph is **early and experimental**: expect breaking changes.
 - [x] Memory protection on the kernel: MMU, caches, read-only code, no-execute data, null and stack guards
 - [x] Interrupts on the kernel: GIC, 100 Hz timer tick, interrupt-driven serial input, `sleep` that idles the CPU
 - [x] Several apps at once: preemptive scheduler, per-app stacks and heaps, crash isolation
-- [ ] Glyph OS next steps: effects enforced as permissions per app by the kernel, messages between apps, a device driver interface, per-app address spaces
-- [ ] The north star: **Glyph OS**, where the kernel enforces effects as permissions
+- [x] Effects as permissions: the kernel grants each app what its `main` declares and stops an app that asks for more
+- [ ] Glyph OS next steps: apps in user mode (EL0) with system calls and per-app address spaces, messages between apps, a device driver interface
+- [ ] The north star: **Glyph OS**, a whole system where every program's effects are declared, checked by the compiler and enforced by the kernel
 
 See [VISION.md](VISION.md) for the full picture.
 

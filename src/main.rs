@@ -405,19 +405,32 @@ fn glyph_os(o: &Opts) -> i32 {
         let name = Path::new(file)
             .file_stem()
             .map_or("app".into(), |s| s.to_string_lossy().into_owned());
-        let effects: Vec<&str> = prog
+        // The kernel grants each app what its `main` declares, and nothing more.
+        let mut effects: Vec<String> = prog
             .funcs
             .iter()
             .find(|f| f.name == "main")
-            .map(|m| m.effects.iter().map(|e| e.0.as_str()).collect())
+            .map(|m| m.effects.iter().map(|e| e.0.clone()).collect())
             .unwrap_or_default();
-        let effects = if effects.is_empty() {
-            "nothing".to_string()
+        if let Some(granted) = grant_override(&name) {
+            effects = granted;
+        }
+        let perms: Vec<&str> = effects
+            .iter()
+            .filter_map(|e| match e.as_str() {
+                "io" => Some("TN_PERM_IO"),
+                "time" => Some("TN_PERM_TIME"),
+                "rand" => Some("TN_PERM_RAND"),
+                _ => None, // emit_c already rejected effects the kernel lacks
+            })
+            .collect();
+        let perms = if perms.is_empty() {
+            "0".to_string()
         } else {
-            effects.join(", ")
+            perms.join(" | ")
         };
         decls += &format!("void tn_app_main_{}(void);\n", i);
-        table.push(format!("{{{:?}, tn_app_main_{}, {:?}}}", name, i, effects));
+        table.push(format!("{{{:?}, tn_app_main_{}, {}}}", name, i, perms));
     }
     let kernel = format!(
         "{}{}\n{}const tn_app tn_apps[] = {{{}}};\nconst int tn_app_count = {};\n",
@@ -502,6 +515,23 @@ SECTIONS {
   __heap_end = 0x50000000;
 }
 ";
+
+/// For testing the kernel's checks: GLYPH_KERNEL_GRANT="clock=io;busy=" makes the
+/// kernel grant those apps only the listed effects, as if their compiled code had been
+/// changed to do more than it declares.
+fn grant_override(app: &str) -> Option<Vec<String>> {
+    let spec = std::env::var("GLYPH_KERNEL_GRANT").ok()?;
+    spec.split(';').find_map(|entry| {
+        let (name, effects) = entry.split_once('=')?;
+        (name.trim() == app).then(|| {
+            effects
+                .split(',')
+                .map(|e| e.trim().to_string())
+                .filter(|e| !e.is_empty())
+                .collect()
+        })
+    })
+}
 
 /// A clang that can build for bare-metal AArch64 (Apple's can't link it): $GLYPH_KERNEL_CC,
 /// then Homebrew's LLVM, then `clang`.

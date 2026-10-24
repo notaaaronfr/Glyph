@@ -1,0 +1,10 @@
+# Rolls dice: needs `rand` from the kernel.
+fn main() uses io, rand {
+  let total = 0
+  for i in range(20) {
+    let roll = random(6) + 1
+    assert roll >= 1 and roll <= 6
+    total = total + roll
+  }
+  print("dice: rolled 20 times, total in range:", total >= 20 and total <= 120)
+}

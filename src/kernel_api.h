@@ -24,20 +24,27 @@ void *realloc(void *p, size_t n);
 int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap);
 int snprintf(char *buf, size_t size, const char *fmt, ...);
 
+/* Each service below that has an effect checks that the app's `main` declared it
+ * (the comment says which); an app that asks for more is stopped by the kernel. */
+
 /* Serial port. Each call's output comes out whole, even if apps switch meanwhile. */
-void tn_out(const char *s, size_t n);
-#define tn_err tn_out
+void tn_out(const char *s, size_t n); /* io */
+/* Error reports: always allowed. */
+void tn_err(const char *s, size_t n);
 void tn_flush(void);
 /* Waits (without using the CPU) for a typed character. */
-int tn_uart_getc(void);
+int tn_uart_getc(void); /* io */
 
 const char *tn_getenv(const char *name);
 
 /* The CPU's generic timer. */
-uint64_t tn_ticks(void);
-uint64_t tn_tick_freq(void);
+uint64_t tn_ticks(void);     /* time */
+uint64_t tn_tick_freq(void); /* time */
 /* Puts the app to sleep; other apps run meanwhile. */
-void tn_sleep_ms(int64_t ms);
+void tn_sleep_ms(int64_t ms); /* time */
+
+/* A seed for the app's random numbers. */
+uint64_t tn_random_seed(void); /* rand */
 
 /* Ends the app (not the machine) with an exit code. */
 __attribute__((noreturn)) void tn_exit(int code);

@@ -249,6 +249,12 @@ fn boot_with(file: &str, input: &str, cflags: &str) -> Option<String> {
 
 /// Boots Glyph OS with several apps at once.
 fn boot_apps(files: &[&str], input: &str, cflags: &str) -> Option<String> {
+    boot_granted(files, input, cflags, "")
+}
+
+/// Like `boot_apps`, with the kernel granting apps other effects than they declare
+/// (GLYPH_KERNEL_GRANT), to test that the kernel enforces them.
+fn boot_granted(files: &[&str], input: &str, cflags: &str, grant: &str) -> Option<String> {
     let file = files.join(" ");
     use std::io::Write;
     let have = |cmd: &str| {
@@ -279,6 +285,7 @@ fn boot_apps(files: &[&str], input: &str, cflags: &str) -> Option<String> {
         .args(files)
         .args(["--target", "kernel"])
         .env("GLYPH_KERNEL_CFLAGS", cflags)
+        .env("GLYPH_KERNEL_GRANT", grant)
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -485,5 +492,69 @@ fn kernel_isolates_a_crashing_app() {
     };
     assert!(at("app crasher stopped") < at("counter: done"), "{}", out);
     assert!(out.contains("crasher      exit 1"), "{}", out);
+    assert!(out.contains("counter      exit 0"), "{}", out);
+}
+
+#[test]
+fn kernel_grants_apps_their_declared_effects() {
+    let apps = [
+        "examples/kernel/apps/counter.gly",
+        "tests/kernel/dice.gly",
+        "tests/kernel/pure_fail.gly",
+    ];
+    let Some(out) = boot_apps(&apps, "", "") else {
+        return;
+    };
+    assert!(out.starts_with("exit: 1"), "{}", out);
+    assert!(
+        out.contains("dice: rolled 20 times, total in range: true"),
+        "{}",
+        out
+    );
+    assert!(out.contains("counter: done"), "{}", out);
+    // An app with no effects can still report its own failure.
+    assert!(out.contains("precondition of `half` violated"), "{}", out);
+    assert!(!out.contains("denied"), "{}", out);
+    assert!(
+        out.contains("counter      exit 0   cpu 0 ms   allowed io, time"),
+        "{}",
+        out
+    );
+    assert!(out.contains("allowed io, rand"), "{}", out);
+    assert!(
+        out.contains("pure_fail    exit 1   cpu 0 ms   allowed nothing"),
+        "{}",
+        out
+    );
+}
+
+#[test]
+fn kernel_stops_an_app_that_exceeds_its_effects() {
+    // As if clock's compiled code had been changed: it reads the clock and sleeps,
+    // but the kernel only grants it `io`. dice gets nothing at all.
+    let apps = [
+        "examples/kernel/apps/clock.gly",
+        "tests/kernel/dice.gly",
+        "examples/kernel/apps/counter.gly",
+    ];
+    let Some(out) = boot_granted(&apps, "", "", "clock=io;dice=") else {
+        return;
+    };
+    assert!(out.starts_with("exit: 77"), "{}", out);
+    assert!(
+        out.contains("denied: app clock tried to read the clock, which needs `time`, but it is only allowed io"),
+        "{}",
+        out
+    );
+    assert!(
+        out.contains("denied: app dice tried to get random numbers, which needs `rand`, but it is only allowed nothing"),
+        "{}",
+        out
+    );
+    assert!(!out.contains("clock: "), "{}", out);
+    assert!(!out.contains("dice: rolled"), "{}", out);
+    assert!(out.contains("counter: done"), "{}", out);
+    assert!(out.contains("clock        exit 77"), "{}", out);
+    assert!(out.contains("dice         exit 77"), "{}", out);
     assert!(out.contains("counter      exit 0"), "{}", out);
 }

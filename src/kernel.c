@@ -16,14 +16,22 @@
  * Multitasking: each app is a task with its own stack and its own heap, so apps share
  * no memory. The timer interrupt switches tasks every tick (preemption), and tasks
  * waiting in `sleep` or `input` are parked until they can continue. An app that fails
- * stops alone; the machine powers off when every app has finished. */
+ * stops alone; the machine powers off when every app has finished.
+ *
+ * Permissions: each app may use only the effects its `main` declares. The kernel
+ * checks every service call (tn_need), on top of the compiler's own check. */
 
 /* ---- apps, as listed by the compiler (generated, linked in) ---- */
+
+/* Effects an app may use. The kernel grants each app exactly what its `main`
+ * declares and checks every service call against that, so even an app whose
+ * compiled code was changed can't do more than it declared. */
+enum { TN_PERM_IO = 1, TN_PERM_TIME = 2, TN_PERM_RAND = 4 };
 
 typedef struct {
     const char *name;
     void (*entry)(void);
-    const char *effects; /* what its `main` declares, for the summary */
+    unsigned perms; /* TN_PERM_* */
 } tn_app;
 extern const tn_app tn_apps[];
 extern const int tn_app_count;
@@ -480,9 +488,9 @@ static void tn_uart_drain(void) {
     }
 }
 
-/* Standard output and errors both go to the serial port. Interrupts are masked for
- * the whole call, so another app's output can't land in the middle of it. */
-void tn_out(const char *s, size_t n) {
+/* Writes to the serial port. Interrupts are masked for the whole call, so another
+ * app's output can't land in the middle of it. */
+static void tn_write(const char *s, size_t n) {
     uint64_t daif = tn_irq_save();
     for (size_t i = 0; i < n; i++) {
         if (s[i] == '\n') tn_uart_putc('\r');
@@ -491,20 +499,13 @@ void tn_out(const char *s, size_t n) {
     tn_irq_restore(daif);
 }
 
-void tn_flush(void) {}
-
-const char *tn_getenv(const char *name) {
-    (void)name;
-    return NULL;
-}
-
-uint64_t tn_ticks(void) {
+static uint64_t tn_counter(void) {
     uint64_t t;
     __asm__ volatile("isb; mrs %0, cntpct_el0" : "=r"(t));
     return t;
 }
 
-uint64_t tn_tick_freq(void) {
+static uint64_t tn_counter_freq(void) {
     uint64_t f;
     __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
     return f;
@@ -526,7 +527,16 @@ static void tn_outf(const char *fmt, ...) {
     va_start(ap, fmt);
     int n = vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
-    tn_out(buf, (size_t)(n < (int)sizeof buf ? n : (int)sizeof buf - 1));
+    tn_write(buf, (size_t)(n < (int)sizeof buf ? n : (int)sizeof buf - 1));
+}
+
+/* "io, time", or "nothing". */
+static void tn_perm_names(unsigned perms, char *buf, size_t size) {
+    static const char *names[] = {"io", "time", "rand"}; /* in TN_PERM_* bit order */
+    size_t n = 0;
+    for (int i = 0; i < 3; i++)
+        if (perms & (1u << i)) n += (size_t)snprintf(buf + n, size - n, "%s%s", n ? ", " : "", names[i]);
+    if (!n) snprintf(buf, size, "nothing");
 }
 
 /* ---- the scheduler ----
@@ -537,7 +547,7 @@ static void tn_outf(const char *fmt, ...) {
 
 /* Makes sleeping and waiting tasks ready when their time comes or input arrives. */
 static void tn_wake(void) {
-    uint64_t now = tn_ticks();
+    uint64_t now = tn_counter();
     bool input = tn_rx_head != tn_rx_tail;
     for (int i = 0; i < tn_ntasks; i++) {
         tn_task *t = &tn_tasks[i];
@@ -573,8 +583,10 @@ __attribute__((noreturn)) static void tn_power_off(void) {
         tn_outf("Glyph OS: all %d apps finished\n", tn_ntasks);
         for (int i = 0; i < tn_ntasks; i++) {
             tn_task *t = &tn_tasks[i];
-            tn_outf("  %-12s exit %d   cpu %llu ms   uses %s\n", t->app->name, t->exit_code,
-                    (unsigned long long)(t->cpu_ticks * 1000 / TN_HZ), t->app->effects);
+            char perms[32];
+            tn_perm_names(t->app->perms, perms, sizeof perms);
+            tn_outf("  %-12s exit %d   cpu %llu ms   allowed %s\n", t->app->name, t->exit_code,
+                    (unsigned long long)(t->cpu_ticks * 1000 / TN_HZ), perms);
         }
     }
     tn_halt(code);
@@ -615,12 +627,56 @@ static void tn_task_start(void) {
     tn_exit(0);
 }
 
-/* ---- what the kernel API offers apps ---- */
+/* ---- what the kernel API offers apps ----
+ * Every service that has an effect first checks that the app was granted it. An app
+ * that asks for more than it declared is stopped, and the other apps keep running. */
+
+#define TN_EXIT_DENIED 77
+
+static void tn_need(unsigned perm, const char *effect, const char *what) {
+    if (!tn_cur || (tn_cur->app->perms & perm)) return;
+    char allowed[32];
+    tn_perm_names(tn_cur->app->perms, allowed, sizeof allowed);
+    tn_outf("[Glyph OS: denied: app %s tried to %s, which needs `%s`, but it is only allowed %s]\n",
+            tn_cur->app->name, what, effect, allowed);
+    tn_exit(TN_EXIT_DENIED);
+}
+
+void tn_out(const char *s, size_t n) {
+    tn_need(TN_PERM_IO, "io", "print");
+    tn_write(s, n);
+}
+
+/* Error reports (failed contracts and the like) are always allowed. */
+void tn_err(const char *s, size_t n) { tn_write(s, n); }
+
+void tn_flush(void) {}
+
+const char *tn_getenv(const char *name) {
+    (void)name;
+    return NULL;
+}
+
+uint64_t tn_ticks(void) {
+    tn_need(TN_PERM_TIME, "time", "read the clock");
+    return tn_counter();
+}
+
+uint64_t tn_tick_freq(void) {
+    tn_need(TN_PERM_TIME, "time", "read the clock");
+    return tn_counter_freq();
+}
+
+uint64_t tn_random_seed(void) {
+    tn_need(TN_PERM_RAND, "rand", "get random numbers");
+    return tn_counter() ^ 0x9e3779b97f4a7c15ULL;
+}
 
 void tn_sleep_ms(int64_t ms) {
-    uint64_t end = tn_ticks() + (uint64_t)ms * (tn_tick_freq() / 1000);
+    tn_need(TN_PERM_TIME, "time", "sleep");
+    uint64_t end = tn_counter() + (uint64_t)ms * (tn_counter_freq() / 1000);
     tn_irqs_off();
-    if (tn_ticks() < end) {
+    if (tn_counter() < end) {
         tn_cur->wake_at = end;
         tn_cur->state = TN_SLEEPING;
         tn_block_current();
@@ -631,6 +687,7 @@ void tn_sleep_ms(int64_t ms) {
 /* Waits for the next typed character. Interrupts are masked while checking, so a
  * character can't arrive unnoticed between the check and parking the task. */
 int tn_uart_getc(void) {
+    tn_need(TN_PERM_IO, "io", "read input");
     for (;;) {
         tn_irqs_off();
         tn_uart_drain(); /* also catches a character whose interrupt was missed */
@@ -736,7 +793,7 @@ static void tn_mmu_on(void) {
     uint64_t ro_end = (uint64_t)__rodata_end, image_end = (uint64_t)__image_end;
     uint64_t tables = (image_end - TN_RAM) / TN_BLOCK_2M;
     if (tables > TN_L3_TABLES) {
-        tn_out("kernel panic: the kernel image is too large to map\n", 51);
+        tn_write("kernel panic: the kernel image is too large to map\n", 51);
         tn_halt(72);
     }
     for (uint64_t a = text; a < image_end; a += TN_PAGE) {
@@ -813,7 +870,7 @@ static void tn_selftest(int which) {
 #define TN_IRQ_UART 33                              /* PL011 serial port (SPI 1) */
 
 static void tn_timer_arm(void) {
-    uint64_t interval = tn_tick_freq() / TN_HZ;
+    uint64_t interval = tn_counter_freq() / TN_HZ;
     __asm__ volatile("msr cntv_tval_el0, %0\nmsr cntv_ctl_el0, %1\nisb" : : "r"(interval), "r"(1ULL));
 }
 
