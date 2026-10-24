@@ -1,5 +1,6 @@
 /* ---- Glyph native runtime (embedded into every compiled program) ----
- * Expects TN_FILE_NAME and TN_SOURCE to be defined first, for error messages.
+ * Expects TN_FILES and TN_SOURCES (path and text of every source file) to be defined
+ * first, for error messages.
  *
  * Memory: every heap value (Str, List, record, enum) starts with a header holding a
  * reference count and its type. The compiler inserts tn_dup / tn_drop so that a value
@@ -21,8 +22,8 @@
 #define TN_MAX_DEPTH 10000
 
 typedef uint8_t tn_unit;
-typedef struct { int32_t line, col; } tn_loc;
-#define TN_LOC(l, c) ((tn_loc){(l), (c)})
+typedef struct { int32_t file, line, col; } tn_loc;
+#define TN_LOC(f, l, c) ((tn_loc){(f), (l), (c)})
 
 struct tn_type;
 
@@ -210,8 +211,8 @@ static const char *tn_fmt(const char *fmt, ...) {
 /* Same format as the interpreter: location, message, source line, caret, hint. */
 __attribute__((noreturn)) static void tn_fail(const char *kind, tn_loc at, const char *msg, const char *hint) {
     fflush(stdout);
-    fprintf(stderr, "%s:%d:%d: %s error: %s\n", TN_FILE_NAME, at.line, at.col, kind, msg);
-    const char *p = TN_SOURCE;
+    fprintf(stderr, "%s:%d:%d: %s error: %s\n", TN_FILES[at.file], at.line, at.col, kind, msg);
+    const char *p = TN_SOURCES[at.file];
     int line = 1;
     while (*p && line < at.line) {
         if (*p == '\n') line++;

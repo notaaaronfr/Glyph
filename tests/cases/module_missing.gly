@@ -1,0 +1,6 @@
+# A missing module says where it looked.
+import lib.nowhere
+
+fn main() uses io {
+  print(1)
+}

@@ -2,6 +2,28 @@
 pub struct Pos {
     pub line: usize,
     pub col: usize,
+    /// Index into the program's `Sources` (0 is the file that was run).
+    pub file: usize,
+}
+
+impl Pos {
+    pub fn new(line: usize, col: usize, file: usize) -> Self {
+        Pos { line, col, file }
+    }
+}
+
+/// The source files of a program: (path as shown to the user, contents).
+#[derive(Debug, Clone, Default)]
+pub struct Sources(pub Vec<(String, String)>);
+
+impl Sources {
+    pub fn path(&self, file: usize) -> &str {
+        self.0.get(file).map_or("?", |f| f.0.as_str())
+    }
+
+    pub fn src(&self, file: usize) -> &str {
+        self.0.get(file).map_or("", |f| f.1.as_str())
+    }
 }
 
 /// Every diagnostic in Glyph: syntax, name, effect, type, contract, runtime, assertion.
@@ -29,7 +51,8 @@ impl Error {
     }
 
     /// Human-readable diagnostic with the offending source line and a caret.
-    pub fn render(&self, file: &str, src: &str) -> String {
+    pub fn render(&self, sources: &Sources) -> String {
+        let (file, src) = (sources.path(self.pos.file), sources.src(self.pos.file));
         let mut s = format!(
             "{}:{}:{}: {} error: {}\n",
             file, self.pos.line, self.pos.col, self.kind, self.msg
@@ -51,7 +74,8 @@ impl Error {
     }
 
     /// One JSON object per line, for AI agents and editors.
-    pub fn to_json(&self, file: &str) -> String {
+    pub fn to_json(&self, sources: &Sources) -> String {
+        let file = sources.path(self.pos.file);
         format!(
             "{{\"file\":{},\"line\":{},\"col\":{},\"kind\":{},\"message\":{},\"hint\":{}}}",
             json_str(file),

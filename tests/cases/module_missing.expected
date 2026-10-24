@@ -1,0 +1,6 @@
+exit: 1
+--- stdout ---
+--- stderr ---
+tests/cases/module_missing.gly:2:1: name error: cannot find module `lib.nowhere` (looked for tests/cases/lib/nowhere.gly)
+2 | import lib.nowhere
+  | ^

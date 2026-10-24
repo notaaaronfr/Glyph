@@ -1,0 +1,15 @@
+exit: 1
+--- stdout ---
+lib.geometry.Point { x: 3, y: 4 } 25
+circle 2!
+square 3
+nothing
+first is a circle of radius 2
+hello! true
+point at 3 4
+inside
+--- stderr ---
+tests/cases/lib/text.gly:8:10: runtime error: division by zero in `a / b`
+8 |   return a / b
+  |          ^
+  hint: guard it with `requires` on the divisor, e.g. `requires b != 0`

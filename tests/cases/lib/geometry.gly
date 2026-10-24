@@ -1,0 +1,50 @@
+# A module: only `pub` items can be used by files that import it.
+import lib.text
+
+pub type Point {
+  x: Int
+  y: Int
+}
+
+pub type Box[T] { item: T }
+
+pub enum Shape {
+  Circle { r: Int }
+  Square { side: Int }
+  Nothing
+}
+
+pub fn origin() -> Point {
+  return Point { x: 0, y: 0 }
+}
+
+pub fn dist2(a: Point, b: Point) -> Int
+  ensures result >= 0
+{
+  return square(a.x - b.x) + square(a.y - b.y)
+}
+
+pub fn describe(s: Shape) -> Str {
+  match s {
+    Circle { r } => { return text.shout("circle " + str(r)) }
+    Square { side } => { return "square " + str(side) }
+    Nothing => { return "nothing" }
+  }
+}
+
+pub fn report(p: Point) uses io {
+  print("point at", p.x, p.y)
+}
+
+pub fn unbox[T](b: Box[T]) -> T {
+  return b.item
+}
+
+# Private: only this file can use it.
+fn square(n: Int) -> Int {
+  return n * n
+}
+
+test "distance" {
+  assert dist2(origin(), Point { x: 3, y: 4 }) == 25
+}

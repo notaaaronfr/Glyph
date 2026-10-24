@@ -5,14 +5,15 @@ mod error;
 mod fix;
 mod interp;
 mod lexer;
+mod loader;
 mod parser;
 
-use error::{json_str, Error, Pos};
+use error::{json_str, Error, Pos, Sources};
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
 
 const USAGE: &str = "\
-Glyph 0.7 - a language AI can write and humans can trust
+Glyph 0.8 - a language AI can write and humans can trust
 
 usage: glyph <command> <file.gly> [options]
 
@@ -120,12 +121,12 @@ fn main() {
     exit(code);
 }
 
-fn report(errs: &[Error], file: &str, src: &str, json: bool) {
+fn report(errs: &[Error], sources: &Sources, json: bool) {
     for e in errs {
         if json {
-            println!("{}", e.to_json(file));
+            println!("{}", e.to_json(sources));
         } else {
-            eprint!("{}", e.render(file, src));
+            eprint!("{}", e.render(sources));
         }
     }
 }
@@ -140,20 +141,22 @@ fn run(o: &Opts, src: &str) -> i32 {
     if o.cmd == "fix" {
         return fix::run(file, src, &o.fix);
     }
-    let prog = match parser::parse(src) {
-        Ok(p) => p,
-        Err(e) => {
-            report(&[e], file, src, json);
+    let (prog, sources, mut errs) = match loader::load(file, src) {
+        Ok(l) => (l.program, l.sources, l.errors),
+        Err((errs, sources)) => {
+            report(&errs, &sources, json);
             return 1;
         }
     };
-    let types = match check::check(&prog) {
-        Ok(t) => t,
-        Err(errs) => {
-            report(&errs, file, src, json);
-            return 1;
-        }
-    };
+    let checked = check::check(&prog);
+    if let Err(more) = &checked {
+        errs.extend(more.iter().cloned());
+    }
+    if !errs.is_empty() {
+        report(&errs, &sources, json);
+        return 1;
+    }
+    let types = checked.expect("no errors");
 
     match o.cmd.as_str() {
         "check" => {
@@ -191,10 +194,10 @@ fn run(o: &Opts, src: &str) -> i32 {
             0
         }
         "build" => {
-            let c = match codegen::emit_c(&prog, &types, file, src) {
+            let c = match codegen::emit_c(&prog, &types, &sources) {
                 Ok(c) => c,
                 Err(e) => {
-                    report(&[e], file, src, json);
+                    report(&[e], &sources, json);
                     return 1;
                 }
             };
@@ -227,10 +230,10 @@ fn run(o: &Opts, src: &str) -> i32 {
             }
         }
         "run" if o.native => {
-            let c = match codegen::emit_c(&prog, &types, file, src) {
+            let c = match codegen::emit_c(&prog, &types, &sources) {
                 Ok(c) => c,
                 Err(e) => {
-                    report(&[e], file, src, json);
+                    report(&[e], &sources, json);
                     return 1;
                 }
             };
@@ -253,11 +256,10 @@ fn run(o: &Opts, src: &str) -> i32 {
             let Some(main) = prog.funcs.iter().find(|f| f.name == "main") else {
                 report(
                     &[
-                        Error::new("name", Pos { line: 1, col: 1 }, "no `main` function to run")
+                        Error::new("name", Pos::new(1, 1, 0), "no `main` function to run")
                             .hint("add `fn main() uses io { ... }`, or use `glyph test`"),
                     ],
-                    file,
-                    src,
+                    &sources,
                     json,
                 );
                 return 1;
@@ -269,8 +271,7 @@ fn run(o: &Opts, src: &str) -> i32 {
                         main.pos,
                         "`main` must not take parameters",
                     )],
-                    file,
-                    src,
+                    &sources,
                     json,
                 );
                 return 1;
@@ -278,7 +279,7 @@ fn run(o: &Opts, src: &str) -> i32 {
             match interp::Interp::new(&prog).call("main", vec![], main.pos) {
                 Ok(_) => 0,
                 Err(e) => {
-                    report(&[e], file, src, json);
+                    report(&[e], &sources, json);
                     1
                 }
             }
@@ -291,7 +292,7 @@ fn run(o: &Opts, src: &str) -> i32 {
                     let err = res
                         .as_ref()
                         .err()
-                        .map(|e| e.to_json(file))
+                        .map(|e| e.to_json(&sources))
                         .unwrap_or_else(|| "null".into());
                     println!(
                         "{{\"test\":{},\"ok\":{},\"error\":{}}}",
@@ -304,7 +305,7 @@ fn run(o: &Opts, src: &str) -> i32 {
                         Ok(()) => eprintln!("  PASS  {}", t.name),
                         Err(e) => {
                             eprintln!("  FAIL  {}", t.name);
-                            eprint!("{}", e.render(file, src));
+                            eprint!("{}", e.render(&sources));
                         }
                     }
                 }

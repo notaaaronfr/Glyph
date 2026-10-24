@@ -125,6 +125,33 @@ source.gly → lexer → parser → checker (names, types, effects) ─┬→ in
                                                                └→ codegen → C → cc -O2 → executable
 ```
 
+## Modules
+
+A program can be split across files. `import lib.geometry` loads `lib/geometry.gly` (relative to the file you run), and everything from it is written with its module name, so code always says where a name comes from. Only `pub` items can be used from outside:
+
+```python
+# lib/geometry.gly
+pub type Point { x: Int, y: Int }
+
+pub fn dist2(a: Point, b: Point) -> Int {
+  return square(a.x - b.x) + square(a.y - b.y)
+}
+
+fn square(n: Int) -> Int { return n * n }    # private to this file
+```
+
+```python
+# app.gly
+import lib.geometry
+
+fn main() uses io {
+  let p = geometry.Point { x: 3, y: 4 }
+  print(geometry.dist2(p, p))
+}
+```
+
+Effects are checked across files: calling `geometry.report()`, which `uses io`, requires the caller to declare `io` too. Each module is loaded once; import cycles and missing modules are reported with the chain or path involved. Errors, including runtime errors in native code, point at the module's own file and line. `glyph test` also runs the tests inside imported modules.
+
 ## Memory management
 
 Natively compiled Glyph uses **precise reference counting with in-place reuse**, in the style of [Perceus](https://www.microsoft.com/en-us/research/publication/perceus-garbage-free-reference-counting-with-reuse/) (Koka, Lean 4):
@@ -152,7 +179,7 @@ GLYPH_MEMSTATS=1 glyph run app.gly --native
 # glyph memstats: 1415650 allocated, 1415650 freed, 0 live at exit, peak 40023 live
 ```
 
-## Language reference (v0.7)
+## Language reference (v0.8)
 
 | Feature | Syntax |
 |---|---|
@@ -162,6 +189,7 @@ GLYPH_MEMSTATS=1 glyph run app.gly --native
 | Match | `match s { Circle { radius } => { ... } Empty => { ... } }`, `Rect { w: width } => ...`, `_ => ...` |
 | Generics | `type Pair[A, B] { ... }`, `enum Tree[T] { ... }`, `fn first[T](xs: List[T]) -> Option[T]` |
 | Built-in types | `Option[T]` (`Some { value }`, `None`), `Result[T, E]` (`Ok { value }`, `Err { error }`) |
+| Modules | `import lib.geometry`, `pub fn` / `pub type` / `pub enum`, `geometry.area(s)`, `geometry.Point { ... }` |
 | Function | `fn name(a: Int) -> Int uses io requires ... ensures ... { ... }` |
 | Variables | `let x = 1`, `let xs: List[Int] = []`, `x = x + 1` |
 | Control flow | `if / else if / else`, `while`, `for x in list_or_string`, `return` |
@@ -244,7 +272,7 @@ Glyph is **early and experimental**: expect breaking changes.
 - [x] Generics, with built-in `Option[T]` and `Result[T, E]`
 - [x] Memory management for native code: precise reference counting with in-place reuse
 - [ ] Reuse of matched enum values (Perceus "reuse analysis"), borrowed parameters
-- [ ] Modules
+- [x] Modules, with `pub` visibility and effects checked across files
 - [x] `glyph fix`: AI repair loop. Fixes are accepted only if they type-check, add no effects, keep every contract and test, and pass
 - [ ] `uses ai`: model calls as a typed, declared effect
 - [ ] `glyph build --tune`: learned, meaning-preserving optimization

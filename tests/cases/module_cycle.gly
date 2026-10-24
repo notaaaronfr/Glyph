@@ -1,0 +1,6 @@
+# Import cycles are reported with the full chain.
+import lib.cycle_a
+
+fn main() uses io {
+  print(cycle_a.a())
+}

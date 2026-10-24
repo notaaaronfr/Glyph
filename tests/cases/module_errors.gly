@@ -1,0 +1,12 @@
+# Module mistakes: private items and effects across modules.
+import lib.geometry
+
+fn quiet(p: geometry.Point) {
+  geometry.report(p)
+}
+
+fn main() uses io {
+  print(geometry.square(3))
+  quiet(geometry.origin())
+  print(dist2(geometry.origin(), geometry.origin()))
+}

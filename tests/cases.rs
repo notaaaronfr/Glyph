@@ -227,3 +227,10 @@ fn updates_with_one_owner_happen_in_place() {
     // 300,000 updates; without in-place reuse this would be hundreds of thousands.
     assert!(allocated < 50, "{} allocations:\n{}", allocated, out);
 }
+
+#[test]
+fn tests_inside_imported_modules_run() {
+    let out = glyph(&["test", "tests/cases/modules.gly"]);
+    assert!(out.starts_with("exit: 0"), "{}", out);
+    assert!(out.contains("PASS  lib.geometry: distance"), "{}", out);
+}

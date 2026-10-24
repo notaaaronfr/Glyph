@@ -1,0 +1,15 @@
+exit: 1
+--- stdout ---
+--- stderr ---
+tests/cases/module_errors.gly:9:9: name error: `geometry.square` is private to module `lib.geometry`
+9 |   print(geometry.square(3))
+  |         ^
+  hint: mark it `pub` in lib/geometry.gly to use it here
+tests/cases/module_errors.gly:5:3: effect error: `quiet` performs effect `io` (by calling `lib.geometry.report`) but does not declare it
+5 |   geometry.report(p)
+  |   ^
+  hint: add `uses io` to the signature if this is intended
+tests/cases/module_errors.gly:11:9: name error: unknown function `dist2`
+11 |   print(dist2(geometry.origin(), geometry.origin()))
+   |         ^
+  hint: did you mean `geometry.dist2`?

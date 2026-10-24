@@ -6,7 +6,8 @@
 //! with the reasons, up to `--tries` times.
 
 use crate::ast::Program;
-use crate::{check, interp, parser};
+use crate::error::Sources;
+use crate::{check, interp, loader};
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::mpsc;
@@ -30,7 +31,7 @@ pub fn run(file: &str, src: &str, o: &FixOpts) -> i32 {
         return 0;
     }
     eprintln!("glyph fix: {} problem(s) in {}", problems.len(), file);
-    let base = Baseline::of(src);
+    let base = Baseline::of(file, src);
     if !base.exact {
         eprintln!("  note: the file doesn't parse, so contract and test preservation can't be checked; effects still are");
     }
@@ -145,20 +146,23 @@ fn accept(file: &str, old: &str, new: &str, explanation: Option<&str>, write: bo
 
 /// Everything Glyph would complain about: syntax, static checks, failing tests.
 fn diagnose(file: &str, src: &str) -> Vec<String> {
-    let prog = match parser::parse(src) {
-        Ok(p) => p,
-        Err(e) => return vec![e.render(file, src)],
+    let (prog, sources, mut errs) = match loader::load(file, src) {
+        Ok(l) => (l.program, l.sources, l.errors),
+        Err((errs, sources)) => return errs.iter().map(|e| e.render(&sources)).collect(),
     };
-    if let Err(errs) = check::check(&prog) {
-        return errs.iter().map(|e| e.render(file, src)).collect();
+    if let Err(more) = check::check(&prog) {
+        errs.extend(more);
     }
-    run_tests(&prog, file, src)
+    if !errs.is_empty() {
+        return errs.iter().map(|e| e.render(&sources)).collect();
+    }
+    run_tests(&prog, &sources)
 }
 
 /// Runs every test on a separate thread, so a fix that loops forever can't hang us.
-fn run_tests(p: &Program, file: &str, src: &str) -> Vec<String> {
+fn run_tests(p: &Program, sources: &Sources) -> Vec<String> {
     let (tx, rx) = mpsc::channel();
-    let (prog, file, src) = (p.clone(), file.to_string(), src.to_string());
+    let (prog, sources) = (p.clone(), sources.clone());
     std::thread::Builder::new()
         .stack_size(1 << 29)
         .spawn(move || {
@@ -168,7 +172,7 @@ fn run_tests(p: &Program, file: &str, src: &str) -> Vec<String> {
                     failures.push(format!(
                         "test \"{}\" failed:\n{}",
                         t.name,
-                        e.render(&file, &src)
+                        e.render(&sources)
                     ));
                 }
             }
@@ -202,7 +206,7 @@ struct Baseline {
 }
 
 impl Baseline {
-    fn of(src: &str) -> Self {
+    fn of(file: &str, src: &str) -> Self {
         let mut b = Baseline {
             effects: HashMap::new(),
             all_effects: BTreeSet::new(),
@@ -210,7 +214,7 @@ impl Baseline {
             tests: HashMap::new(),
             exact: false,
         };
-        let Ok(p) = parser::parse(src) else {
+        let Ok(p) = loader::load(file, src).map(|l| l.program) else {
             b.all_effects = scan_uses(src);
             return b;
         };
@@ -333,15 +337,21 @@ fn guard(base: &Baseline, cand: &Program) -> Vec<String> {
 }
 
 fn verify(base: &Baseline, file: &str, cand: &str) -> Result<(), Vec<String>> {
-    let prog = parser::parse(cand).map_err(|e| vec![e.render(file, cand)])?;
-    if let Err(errs) = check::check(&prog) {
-        return Err(errs.iter().map(|e| e.render(file, cand)).collect());
+    let (prog, sources, mut errs) = match loader::load(file, cand) {
+        Ok(l) => (l.program, l.sources, l.errors),
+        Err((errs, sources)) => return Err(errs.iter().map(|e| e.render(&sources)).collect()),
+    };
+    if let Err(more) = check::check(&prog) {
+        errs.extend(more);
+    }
+    if !errs.is_empty() {
+        return Err(errs.iter().map(|e| e.render(&sources)).collect());
     }
     let violations = guard(base, &prog);
     if !violations.is_empty() {
         return Err(violations);
     }
-    let failures = run_tests(&prog, file, cand);
+    let failures = run_tests(&prog, &sources);
     if failures.is_empty() {
         Ok(())
     } else {
@@ -462,6 +472,8 @@ values `Circle { radius: 2 }`, `Empty`. Read them with `match s { Circle { radiu
 type arguments are inferred. Built in: `enum Option[T] { Some { value: T }, None }` and \
 `enum Result[T, E] { Ok { value: T }, Err { error: E } }`. Inside generic code, values of type `T` \
 support only `==`, `!=`, printing and storing.
+- Modules: `import lib.geometry` loads lib/geometry.gly; its `pub` items are used as \
+`geometry.name` (functions, types, variants, patterns). Only the file being fixed may be changed.
 - Tests: `test \"name\" { assert ... }`.
 
 Glyph verifies every fix you propose and rejects it if it adds an effect the original did \

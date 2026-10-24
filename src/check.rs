@@ -974,7 +974,23 @@ impl<'a> Checker<'a> {
             return self.builtin_call(name, args, pos);
         }
         let Some(f) = self.sigs.get(name).copied() else {
-            self.err("name", pos, format!("unknown function `{}`", name));
+            let mut err = Error::new("name", pos, format!("unknown function `{}`", name));
+            // `dist2` when an imported module has `lib.geometry.dist2`: suggest `geometry.dist2`.
+            let suffix = format!(".{}", name);
+            let mut found: Vec<&str> = self
+                .sigs
+                .keys()
+                .filter(|k| k.ends_with(&suffix))
+                .copied()
+                .collect();
+            found.sort();
+            if let Some(full) = found.first() {
+                let parts: Vec<&str> = full.rsplitn(3, '.').collect();
+                if parts.len() >= 2 {
+                    err = err.hint(format!("did you mean `{}.{}`?", parts[1], parts[0]));
+                }
+            }
+            self.errors.push(err);
             args.iter().for_each(|a| {
                 self.expr(a, None);
             });

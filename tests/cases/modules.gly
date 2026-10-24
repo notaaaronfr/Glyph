@@ -1,0 +1,22 @@
+# Modules: imports, qualified names for functions, types, variants and patterns,
+# generics across modules, effects across modules, and a runtime error inside a module.
+import lib.geometry
+import lib.text
+
+fn main() uses io {
+  let p = geometry.Point { x: 3, y: 4 }
+  print(p, geometry.dist2(p, geometry.origin()))
+  let shapes: List[geometry.Shape] = [geometry.Circle { r: 2 }, geometry.Square { side: 3 }, geometry.Nothing]
+  for s in shapes {
+    print(geometry.describe(s))
+  }
+  match shapes[0] {
+    geometry.Circle { r } => { print("first is a circle of radius", r) }
+    _ => { print("something else") }
+  }
+  print(text.shout("hello"), shapes[2] == geometry.Nothing)
+  geometry.report(p)
+  let b: geometry.Box[Str] = geometry.Box { item: "inside" }
+  print(geometry.unbox(b))
+  print(text.divide(1, 0))
+}

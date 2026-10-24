@@ -1,12 +1,73 @@
 use crate::ast::*;
 use crate::error::{Error, Pos};
 use crate::lexer::{lex, Tok, Token};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-const KEYWORDS: [&str; 21] = [
+const KEYWORDS: [&str; 23] = [
     "fn", "let", "if", "else", "while", "for", "in", "return", "true", "false", "uses", "requires",
-    "ensures", "test", "assert", "and", "or", "not", "type", "enum", "match",
+    "ensures", "test", "assert", "and", "or", "not", "type", "enum", "match", "import", "pub",
 ];
+
+/// The names a module declares, so files importing it can parse `module.Name`.
+#[derive(Debug, Clone, Default)]
+pub struct ModuleNames {
+    pub funcs: HashSet<String>,
+    pub types: HashSet<String>,
+    pub enums: HashSet<String>,
+    pub variants: HashSet<String>,
+    pub variants_with_fields: HashSet<String>,
+}
+
+impl ModuleNames {
+    pub fn of(p: &Program) -> Self {
+        let mut m = ModuleNames {
+            funcs: p.funcs.iter().map(|f| f.name.clone()).collect(),
+            types: p.types.iter().map(|t| t.name.clone()).collect(),
+            enums: p.enums.iter().map(|e| e.name.clone()).collect(),
+            ..Default::default()
+        };
+        for v in p.enums.iter().flat_map(|e| &e.variants) {
+            m.variants.insert(v.name.clone());
+            if !v.fields.is_empty() {
+                m.variants_with_fields.insert(v.name.clone());
+            }
+        }
+        m
+    }
+
+    pub fn contains(&self, n: &str) -> bool {
+        self.funcs.contains(n)
+            || self.types.contains(n)
+            || self.enums.contains(n)
+            || self.variants.contains(n)
+    }
+}
+
+/// The modules a file imports (`import a.b`), found without parsing the whole file.
+pub fn scan_imports(src: &str, file: usize) -> Result<Vec<(String, Pos)>, Error> {
+    let toks = lex(src, file)?;
+    let mut out = vec![];
+    let mut i = 0;
+    while i < toks.len() {
+        if toks[i].tok == Tok::Ident("import".into()) {
+            let pos = toks[i].pos;
+            let mut path = vec![];
+            i += 1;
+            while let Some(Tok::Ident(n)) = toks.get(i).map(|t| &t.tok) {
+                path.push(n.clone());
+                if toks.get(i + 1).map(|t| &t.tok) != Some(&Tok::Sym(".")) {
+                    break;
+                }
+                i += 2;
+            }
+            if !path.is_empty() {
+                out.push((path.join("."), pos));
+            }
+        }
+        i += 1;
+    }
+    Ok(out)
+}
 
 const BUILTIN_TYPES: [&str; 6] = ["Int", "Str", "Bool", "Unit", "Any", "List"];
 
@@ -23,13 +84,21 @@ enum Result[T, E] {
 }
 ";
 
-pub fn parse(src: &str) -> Result<Program, Error> {
+/// Parses one file. `aliases` maps each imported module's name (the last part of its
+/// path) to what it declares. The prelude's declarations are added if `prelude`.
+/// `import` lines are skipped here; the loader reads them with `scan_imports`.
+pub fn parse_file(
+    src: &str,
+    file: usize,
+    aliases: &HashMap<String, ModuleNames>,
+    prelude: bool,
+) -> Result<Program, Error> {
     // Prelude positions are line 0, which marks them as built in.
-    let mut prelude_toks = lex(PRELUDE).expect("the prelude lexes");
+    let mut prelude_toks = lex(PRELUDE, 0).expect("the prelude lexes");
     for t in &mut prelude_toks {
-        t.pos = Pos { line: 0, col: 0 };
+        t.pos = Pos::default();
     }
-    let user_toks = lex(src)?;
+    let user_toks = lex(src, file)?;
     let all: Vec<Token> = prelude_toks.iter().chain(&user_toks).cloned().collect();
     // Record types may be used before they are declared, and `Name {` is only a record
     // literal when `Name` is a declared type, so collect the type names up front.
@@ -51,6 +120,7 @@ pub fn parse(src: &str) -> Result<Program, Error> {
         funcs: vec![],
         tests: vec![],
     };
+    let prelude_decls = prelude;
     let mut prelude = Parser {
         toks: prelude_toks,
         i: 0,
@@ -60,10 +130,14 @@ pub fn parse(src: &str) -> Result<Program, Error> {
         variant_names: variant_names.clone(),
         variants_with_fields: variants_with_fields.clone(),
         tparams: vec![],
+        aliases: HashMap::new(),
     };
     while prelude.is_kw("enum") {
-        prog.enums
-            .push(prelude.enum_decl().expect("the prelude parses"));
+        let mut e = prelude.enum_decl().expect("the prelude parses");
+        e.public = true;
+        if prelude_decls {
+            prog.enums.push(e);
+        }
     }
     let mut p = Parser {
         toks: user_toks,
@@ -74,21 +148,39 @@ pub fn parse(src: &str) -> Result<Program, Error> {
         variant_names,
         variants_with_fields,
         tparams: vec![],
+        aliases: aliases.clone(),
     };
     loop {
         if matches!(p.peek(), Tok::Eof) {
             break;
-        } else if p.is_kw("type") {
-            prog.types.push(p.type_decl()?);
+        }
+        if p.eat_kw("import") {
+            p.ident()?;
+            while p.eat_sym(".") {
+                p.ident()?;
+            }
+            continue;
+        }
+        let public = p.eat_kw("pub");
+        if p.is_kw("type") {
+            let mut t = p.type_decl()?;
+            t.public = public;
+            prog.types.push(t);
         } else if p.is_kw("enum") {
-            prog.enums.push(p.enum_decl()?);
+            let mut e = p.enum_decl()?;
+            e.public = public;
+            prog.enums.push(e);
         } else if p.is_kw("fn") {
-            prog.funcs.push(p.func()?);
+            let mut f = p.func()?;
+            f.public = public;
+            prog.funcs.push(f);
+        } else if public {
+            return Err(p.err("`pub` goes before `fn`, `type` or `enum`"));
         } else if p.is_kw("test") {
             prog.tests.push(p.test()?);
         } else {
             return Err(p.err(format!(
-                "expected `type`, `enum`, `fn` or `test` at top level, found {}",
+                "expected `import`, `type`, `enum`, `fn` or `test` at top level, found {}",
                 p.describe()
             )));
         }
@@ -142,6 +234,8 @@ struct Parser<'a> {
     variants_with_fields: HashSet<String>,
     /// Type parameters in scope while parsing a generic declaration or function.
     tparams: Vec<String>,
+    /// Imported modules, by the name they are used with.
+    aliases: HashMap<String, ModuleNames>,
 }
 
 fn bx(e: Expr) -> Box<Expr> {
@@ -277,6 +371,7 @@ impl<'a> Parser<'a> {
         self.tparams.clear();
         Ok(Func {
             name,
+            public: false,
             tparams,
             params,
             ret,
@@ -342,6 +437,7 @@ impl<'a> Parser<'a> {
         self.tparams.clear();
         Ok(TypeDecl {
             name,
+            public: false,
             params,
             fields,
             pos,
@@ -381,6 +477,7 @@ impl<'a> Parser<'a> {
         }
         Ok(EnumDecl {
             name,
+            public: false,
             params,
             variants,
             pos,
@@ -401,7 +498,51 @@ impl<'a> Parser<'a> {
         Ok(fields)
     }
 
+    /// `module.name`, when the current token is an imported module's name followed by `.`.
+    fn qualified(&mut self) -> Result<Option<(String, String, Pos)>, Error> {
+        let Tok::Ident(m) = self.peek().clone() else {
+            return Ok(None);
+        };
+        let dot_next = self.toks.get(self.i + 1).map(|t| &t.tok) == Some(&Tok::Sym("."));
+        if !self.aliases.contains_key(&m) || !dot_next {
+            return Ok(None);
+        }
+        let pos = self.pos();
+        self.bump();
+        self.bump();
+        let (n, npos) = self.ident()?;
+        if !self.aliases[&m].contains(&n) {
+            return Err(Error::new(
+                "name",
+                npos,
+                format!(
+                    "module `{}` has no function, type or variant called `{}`",
+                    m, n
+                ),
+            ));
+        }
+        Ok(Some((m, n, pos)))
+    }
+
     fn pattern(&mut self) -> Result<Pattern, Error> {
+        if let Some((m, n, pos)) = self.qualified()? {
+            let name = format!("{}.{}", m, n);
+            let mut binds = vec![];
+            if self.eat_sym("{") {
+                while !self.is_sym("}") {
+                    let (f, fpos) = self.ident()?;
+                    let var = if self.eat_sym(":") {
+                        self.ident()?.0
+                    } else {
+                        f.clone()
+                    };
+                    binds.push((f, var, fpos));
+                    self.eat_sym(",");
+                }
+                self.bump();
+            }
+            return Ok(Pattern::Variant(name, binds, pos));
+        }
         let (n, pos) = self.ident()?;
         if n == "_" {
             return Ok(Pattern::Wildcard(pos));
@@ -500,6 +641,21 @@ impl<'a> Parser<'a> {
     }
 
     fn ty(&mut self) -> Result<Type, Error> {
+        if let Some((m, n, pos)) = self.qualified()? {
+            let names = &self.aliases[&m];
+            let name = format!("{}.{}", m, n);
+            return if names.types.contains(&n) {
+                Ok(Type::Record(name, self.type_args()?))
+            } else if names.enums.contains(&n) {
+                Ok(Type::Enum(name, self.type_args()?))
+            } else {
+                Err(Error::new(
+                    "syntax",
+                    pos,
+                    format!("`{}` is not a type", name),
+                ))
+            };
+        }
         let (n, pos) = self.ident()?;
         Ok(match n.as_str() {
             "Int" => Type::Int,
@@ -759,6 +915,39 @@ impl<'a> Parser<'a> {
 
     fn primary(&mut self) -> Result<Expr, Error> {
         let s = self.i;
+        if let Some((m, n, pos)) = self.qualified()? {
+            let names = self.aliases[&m].clone();
+            let name = format!("{}.{}", m, n);
+            if self.is_sym("(") && !self.tok().nl_before && names.funcs.contains(&n) {
+                self.bump();
+                let mut args = vec![];
+                while !self.is_sym(")") {
+                    args.push(self.expr()?);
+                    if !self.eat_sym(",") {
+                        break;
+                    }
+                }
+                self.expect_sym(")")?;
+                return Ok(self.mk(ExprKind::Call(name, args), s));
+            }
+            if names.types.contains(&n) && self.is_sym("{") {
+                let fields = self.field_values()?;
+                return Ok(self.mk(ExprKind::Record(name, fields), s));
+            }
+            if names.variants_with_fields.contains(&n) && self.is_sym("{") {
+                let fields = self.field_values()?;
+                return Ok(self.mk(ExprKind::Variant(name, fields), s));
+            }
+            if names.variants.contains(&n) {
+                return Ok(self.mk(ExprKind::Variant(name, vec![]), s));
+            }
+            let hint = if names.funcs.contains(&n) {
+                format!("call it: `{}(...)`", name)
+            } else {
+                format!("create a value with `{} {{ ... }}`", name)
+            };
+            return Err(Error::new("syntax", pos, format!("`{}` is not a value", name)).hint(hint));
+        }
         let t = self.bump();
         match t.tok {
             Tok::Int(n) => Ok(self.mk(ExprKind::Int(n), s)),

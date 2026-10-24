@@ -22,6 +22,7 @@ cargo test --release
 src/
   lexer.rs     source text → tokens
   parser.rs    tokens → syntax tree (ast.rs)
+  loader.rs    finds and loads imported modules, gives their items qualified names
   check.rs     static checks: names, arity, types, effects
   interp.rs    tree-walking interpreter (glyph run, glyph test)
   codegen.rs   native compiler: syntax tree → C
@@ -31,6 +32,7 @@ src/
   main.rs      command-line interface
 tests/
   cases/       snapshot tests: *.gly programs and their *.expected output
+               (cases/lib/ holds modules they import)
   cases.rs     the test harness
   fix/         a broken program, an honest fix and "cheating" fixes for the guard tests
   memory/      programs checked for leaks, use-after-free and in-place reuse

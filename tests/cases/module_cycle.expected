@@ -1,0 +1,7 @@
+exit: 1
+--- stdout ---
+--- stderr ---
+tests/cases/lib/cycle_b.gly:1:1: name error: import cycle: lib.cycle_a -> lib.cycle_b -> lib.cycle_a
+1 | import lib.cycle_a
+  | ^
+  hint: move what both modules need into a third module that neither imports

@@ -168,6 +168,8 @@ pub struct Param {
 #[derive(Debug, Clone)]
 pub struct Func {
     pub name: String,
+    /// Declared `pub`: other modules may call it.
+    pub public: bool,
     /// Type parameters: `fn first[T](xs: List[T]) -> Option[T]`.
     pub tparams: Vec<String>,
     pub params: Vec<Param>,
@@ -191,6 +193,7 @@ pub struct Test {
 #[derive(Debug, Clone)]
 pub struct TypeDecl {
     pub name: String,
+    pub public: bool,
     pub params: Vec<String>,
     pub fields: Vec<(String, Type, Pos)>,
     pub pos: Pos,
@@ -224,6 +227,7 @@ impl VariantDecl {
 #[derive(Debug, Clone)]
 pub struct EnumDecl {
     pub name: String,
+    pub public: bool,
     pub params: Vec<String>,
     pub variants: Vec<VariantDecl>,
     pub pos: Pos,

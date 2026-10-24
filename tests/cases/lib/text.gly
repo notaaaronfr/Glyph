@@ -1,0 +1,9 @@
+# A small module used by lib/geometry.gly and tests/cases/modules.gly.
+
+pub fn shout(s: Str) -> Str {
+  return s + "!"
+}
+
+pub fn divide(a: Int, b: Int) -> Int {
+  return a / b
+}

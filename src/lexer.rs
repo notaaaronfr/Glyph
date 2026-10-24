@@ -26,7 +26,8 @@ const SYMS1: [&str; 17] = [
     "(", ")", "{", "}", "[", "]", ",", ":", ".", "+", "-", "*", "/", "%", "<", ">", "=",
 ];
 
-pub fn lex(src: &str) -> Result<Vec<Token>, Error> {
+/// `file` is the source's index in the program's `Sources`, recorded in every position.
+pub fn lex(src: &str, file: usize) -> Result<Vec<Token>, Error> {
     let cs: Vec<(usize, char)> = src.char_indices().collect();
     let off = |i: usize| if i < cs.len() { cs[i].0 } else { src.len() };
     let mut toks = Vec::new();
@@ -34,7 +35,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Error> {
 
     while i < cs.len() {
         let c = cs[i].1;
-        let pos = Pos { line, col };
+        let pos = Pos::new(line, col, file);
         let start = i;
         if c == '\n' {
             line += 1;
@@ -139,7 +140,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Error> {
     }
     toks.push(Token {
         tok: Tok::Eof,
-        pos: Pos { line, col },
+        pos: Pos::new(line, col, file),
         start: src.len(),
         end: src.len(),
         nl_before: true,
