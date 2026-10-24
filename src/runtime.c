@@ -732,7 +732,8 @@ static const char *tn_inputs(int n, const char **names, tn_str **vals) {
     return b.p;
 }
 
-static int64_t tn_parse_int(tn_str *s, tn_loc at) {
+/* Parses a whole string (surrounding whitespace allowed) as an Int. */
+static bool tn_parse_digits(tn_str *s, int64_t *out) {
     const char *p = s->data, *end = s->data + s->len;
     while (p < end && (*p == ' ' || (*p >= '\t' && *p <= '\r'))) p++;
     while (end > p && (end[-1] == ' ' || (end[-1] >= '\t' && end[-1] <= '\r'))) end--;
@@ -744,8 +745,23 @@ static int64_t tn_parse_int(tn_str *s, tn_loc at) {
         if (*p < '0' || *p > '9' || v > (limit - (uint64_t)(*p - '0')) / 10) ok = false;
         else v = v * 10 + (uint64_t)(*p - '0');
     }
-    if (!ok) tn_fail("runtime", at, tn_fmt("cannot convert %s to Int", tn_to_str(TN_P(s), &TY_s, true)->data), NULL);
-    return neg ? (int64_t)(0 - v) : (int64_t)v;
+    if (ok) *out = neg ? (int64_t)(0 - v) : (int64_t)v;
+    return ok;
+}
+
+static int64_t tn_parse_int(tn_str *s, tn_loc at) {
+    int64_t v;
+    if (!tn_parse_digits(s, &v))
+        tn_fail("runtime", at, tn_fmt("cannot convert %s to Int", tn_to_str(TN_P(s), &TY_s, true)->data), NULL);
+    return v;
+}
+
+/* parse_int(s): Some { value } or None. `opt` is the descriptor of Option[Int]
+ * (variant 0 is Some, 1 is None). */
+static tn_enum *tn_try_parse_int(tn_str *s, const tn_type *opt) {
+    int64_t v;
+    if (tn_parse_digits(s, &v)) return tn_enum_new(opt, 0, 1, (tn_val[]){TN_I(v)});
+    return tn_enum_new(opt, 1, 0, NULL);
 }
 
 /* ---- effects ---- */

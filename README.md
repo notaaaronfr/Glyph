@@ -226,7 +226,7 @@ GLYPH_MEMSTATS=1 glyph run app.gly --native
 | Control flow | `if / else if / else`, `while`, `for x in list_or_string`, `return` |
 | Operators | `+ - * / %`, `== != < <= > >=`, `and or not`, `xs[i]` |
 | Effects | `io` (terminal), `fs` (files), `time` (clock), `rand` (randomness) |
-| Pure built-ins | `len str int abs push range join split contains` |
+| Pure built-ins | `len str int abs push range join split contains`, `parse_int` (returns `Option[Int]` instead of crashing) |
 | Effectful built-ins | `print input` (io), `read_file write_file` (fs), `now` (time), `random` (rand) |
 
 Contracts must be pure, and `ensures` sees the arguments as they were passed in, even if the body reassigns them. Comments start with `#`. There are no semicolons; newlines separate statements.

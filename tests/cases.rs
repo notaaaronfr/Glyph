@@ -310,10 +310,15 @@ fn kernel_boots_and_runs_glyph() {
 
 #[test]
 fn kernel_shell_reads_the_serial_port() {
-    let Some(out) = boot("examples/kernel/shell.gly", "fib 20\nsum 1 2 3\nexit\n") else {
+    // Bad input must not crash the OS: empty lines, non-numbers, out-of-range values.
+    let input = "fib 20\n\nfib abc\nfib 50\nsum 1 two\nsum 1 2 3\nexit\n";
+    let Some(out) = boot("examples/kernel/shell.gly", input) else {
         return;
     };
     assert!(out.starts_with("exit: 0"), "{}", out);
+    assert!(out.contains("not a number: abc"), "{}", out);
+    assert!(out.contains("fib needs a number from 0 to 40"), "{}", out);
+    assert!(out.contains("not a number: two"), "{}", out);
     assert!(out.contains("fib(20) = 6765"), "{}", out);
     assert!(out.contains("sum = 6"), "{}", out);
     assert!(out.contains("powering off"), "{}", out);

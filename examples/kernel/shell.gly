@@ -9,6 +9,8 @@ enum Command {
   Uptime
   Sum { numbers: List[Int] }
   Exit
+  Nothing
+  Invalid { message: Str }
   Unknown { word: Str }
 }
 
@@ -21,15 +23,28 @@ fn parse(line: Str) -> Command {
     rest = push(rest, words[i])
     i = i + 1
   }
+  if cmd == "" { return Nothing }
   if cmd == "help" { return Help }
   if cmd == "echo" { return Echo { text: join(rest, " ") } }
   if cmd == "uptime" { return Uptime }
   if cmd == "exit" { return Exit }
-  if cmd == "fib" and len(rest) == 1 { return Fib { n: int(rest[0]) } }
+  if cmd == "fib" {
+    if len(rest) != 1 { return Invalid { message: "usage: fib <n>" } }
+    match parse_int(rest[0]) {
+      Some { value } => {
+        if value < 0 or value > 40 { return Invalid { message: "fib needs a number from 0 to 40" } }
+        return Fib { n: value }
+      }
+      None => { return Invalid { message: "not a number: " + rest[0] } }
+    }
+  }
   if cmd == "sum" {
     let nums: List[Int] = []
     for w in rest {
-      nums = push(nums, int(w))
+      match parse_int(w) {
+        Some { value } => { nums = push(nums, value) }
+        None => { return Invalid { message: "not a number: " + w } }
+      }
     }
     return Sum { numbers: nums }
   }
@@ -62,6 +77,8 @@ fn main() uses io, time {
         print("powering off")
         running = false
       }
+      Nothing => {}
+      Invalid { message } => { print(message) }
       Unknown { word } => { print("unknown command:", word, "(try `help`)") }
     }
   }

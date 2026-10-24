@@ -652,6 +652,17 @@ impl<'a> Interp<'a> {
                 .trim()
                 .parse()
                 .map_err(|_| rt(format!("cannot convert {:?} to Int", s)))?),
+            ("parse_int", [Str(s)]) => {
+                let (variant, fields) = match s.trim().parse::<i64>() {
+                    Ok(n) => ("Some", vec![("value".to_string(), Int(n))]),
+                    Err(_) => ("None", vec![]),
+                };
+                Enum(Rc::new(EnumVal {
+                    enum_name: "Option".into(),
+                    variant: variant.into(),
+                    fields,
+                }))
+            }
             ("abs", [Int(n)]) => Int(n
                 .checked_abs()
                 .ok_or_else(|| rt("integer overflow in `abs`".into()))?),

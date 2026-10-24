@@ -461,7 +461,8 @@ time (now), rand (random). Calling a function counts as performing its effects. 
 - Statements: `let x = e`, `let xs: List[Int] = []`, `x = e`, `if c { } else if c { } else { }`, \
 `while c { }`, `for x in list_or_string { }`, `return e`, `assert c`. No semicolons, no `break`/`continue`.
 - Operators: + - * / % (Int; + also joins Str and List), == != < <= > >=, and, or, not, xs[i].
-- Pure built-ins: len, str, int, abs, push (returns a new list), range, join, split, contains.
+- Pure built-ins: len, str, int (crashes on bad input), parse_int (returns Option[Int]), abs, push \
+(returns a new list), range, join, split, contains.
 - Records: `type Point { x: Int, y: Int }` (fields separated by commas or newlines), \
 literals `Point { x: 1, y: 2 }` (every field required), access `p.x`, update `p.x = 5` (records are \
 values: this updates only `p`), structural `==`.

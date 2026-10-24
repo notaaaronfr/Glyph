@@ -1444,6 +1444,10 @@ impl<'a> Gen<'a> {
                 _ => a[0].clone(),
             },
             "abs" => format!("tn_abs({}, {})", a[0], at),
+            "parse_int" => {
+                let d = self.tydesc(t);
+                format!("tn_try_parse_int({}, {})", a[0], d)
+            }
             "push" => {
                 let elem = elem_of(t);
                 let list = self.own(&atoms[0], t);

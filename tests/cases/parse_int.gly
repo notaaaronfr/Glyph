@@ -1,0 +1,21 @@
+# parse_int never crashes: it returns Some { value } or None.
+fn show(s: Str) -> Str {
+  match parse_int(s) {
+    Some { value } => { return "Some " + str(value) }
+    None => { return "None" }
+  }
+}
+
+fn main() uses io {
+  for s in ["42", " -7 ", "+3", "abc", "", "12x", "9223372036854775807", "9223372036854775808", "-9223372036854775808"] {
+    print(str([s]), "->", show(s))
+  }
+  let total = 0
+  for w in split("1 2 oops 3", " ") {
+    match parse_int(w) {
+      Some { value } => { total = total + value }
+      None => { print("skipping", w) }
+    }
+  }
+  print("total", total)
+}

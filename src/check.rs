@@ -24,7 +24,7 @@ pub fn builtin(name: &str) -> Option<(usize, Option<usize>, Option<&'static str>
         "write_file" => (2, Some(2), Some("fs")),
         "now" => (0, Some(0), Some("time")),
         "random" => (1, Some(1), Some("rand")),
-        "len" | "str" | "int" | "abs" => (1, Some(1), None),
+        "len" | "str" | "int" | "abs" | "parse_int" => (1, Some(1), None),
         "push" | "join" | "split" | "contains" => (2, Some(2), None),
         "range" => (1, Some(2), None),
         _ => return None,
@@ -1104,6 +1104,10 @@ impl<'a> Checker<'a> {
                     );
                 }
                 Int
+            }
+            "parse_int" => {
+                self.expect(&args[0], &Str, &arg(0));
+                Enum("Option".into(), vec![Int])
             }
             "abs" | "random" => {
                 self.expect(&args[0], &Int, &arg(0));
