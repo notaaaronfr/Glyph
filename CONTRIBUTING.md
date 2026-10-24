@@ -116,3 +116,30 @@ Changes to syntax or semantics deserve discussion before code. Open an issue usi
 - Be patient and kind in review; everyone here is volunteering their time.
 
 By contributing, you agree that your contributions are licensed under the project's dual MIT / Apache-2.0 license, and you agree to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+## PR Template
+
+### Summary
+
+<!-- Briefly explain what this PR does and why. -->
+
+### Changes
+
+- 
+- 
+
+### Testing
+
+<!-- Explain how you verified the changes. -->
+
+- [ ] Tests pass
+- [ ] Manually tested where applicable
+
+### Related Issue
+
+<!-- Example: Closes #123 -->
+Closes #
+
+### Screenshots / Notes
+
+<!-- Add screenshots for UI changes or any additional context. Remove if not applicable. -->
