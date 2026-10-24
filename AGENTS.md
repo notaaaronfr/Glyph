@@ -1,40 +1,55 @@
 # AGENTS.md
 
-## Style and Structure
+Glyph exists so an agent's change can be checked against promises a human owns ([VISION.md](VISION.md)).
+Hold changes to this repo to the same standard: never make a check pass by weakening it. The crate map,
+the order a feature touches files, and the native memory rules are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
-- Prefer private modules with an explicitly exported public crate API. Internals are `pub(crate)`.
-- Name modules for what they own, not `utils` or `common`
-- Inline format args: always prefer `format!("{x}")` over positional.
-- Collapse if statements per clippy::collapsible_if.
-- Prefer method references over closures per clippy::redundant_closure_for_method_calls.
-- Make `match` statements exhaustive; avoid wildcard arms.
-- New traits need concise doc comments explaining their role and how implementations are expected to behave.
-- No opaque positional `bool`/`Option` parameters (`foo(false)` is unreadable). Prefer enums,
-  named methods, or newtypes. If you must pass an opaque literal by position, use an exact
-  `/*param_name*/` comment matching the callee signature.
-- Prefer native RPITIT trait methods with explicit `Send` bounds
-  (`fn foo(&self) -> impl Future<Output = T> + Send;`) over `#[async_trait]` or
-  `#[allow(async_fn_in_trait)]`. Implementations may use `async fn` when they satisfy the contract.
-- No single-use helper methods. Do not create a helper referenced only once.
-- Instrument async work at the definition (`#[tracing::instrument(...)]`), not with
-  `.instrument(...)` at call sites. Check whether the callee is already instrumented first.
+## Checks you must not weaken
 
-## Repository
+- **Interpreter and native agree byte for byte, error messages included.** A behaviour change lands in
+  `interp.rs` and in `codegen.rs`/`runtime.c` in the same change.
+- **`GLYPH_BLESS=1` rewrites every `.expected` file.** Use it only for a new case or an intended output
+  change, then read `git diff tests/cases/` and account for every changed line. Never bless to make a failing test pass.
+- **Red-team cases are permanent.** Change a case in `tests/redteam.rs` only to flip `KnownBypass` to
+  `Holds`, in the change that fixes it. Never delete one.
+- **Kernel tests skip silently** if `qemu-system-aarch64` or clang is missing, and `cargo test` still passes.
+  After touching `glyph-kernel` or `--target kernel`, run with `GLYPH_REQUIRE_KERNEL=1`, or say they didn't run.
+- Fix clippy warnings rather than silencing them. If you must, use `#[expect(lint, reason = "...")]`, never `#[allow]`.
 
-- **Never set git identity for commits to this repo's history.** Agents must not set
-  `user.name`/`user.email` (config or `-c`) or `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL`/
-  `GIT_COMMITTER_NAME`/`GIT_COMMITTER_EMAIL` for commits that land in this repository.
-  Those commits carry the identity of the ambient git config. Try to use the active `gh` account.
-- **Never add `Co-authored-by` trailers** — not in commit messages, not in squash
-  suggestions, not as attribution for work merged from branches. A PR's commits carry
-  one identity: the ambient git config's. Fabricated or hand-written trailers (including
-  noreply forms) misattribute commits to unrelated GitHub accounts.
-- Use the [PR Template](CONTRIBUTING.md#pr-template) in `CONTRIBUTING.md` when opening PRs
+## Trusted crates
+
+- `glyph-front`, `glyph-run` and `glyph-kernel` are trusted (`trust` in `[package.metadata.glyph]`), and
+  `glyph-native` is trusted for claims about native binaries. Each keeps `#![forbid(unsafe_code)]`.
+- Don't add crates.io dependencies to them. `scripts/tcb.sh` counts only each crate's own lines, so a
+  dependency grows the trusted base without tripping the budget.
+- New syntax or semantics needs an accepted issue first. New Glyph OS surface waits for P2. Every capability
+  claim in docs carries a `[vX.Y]` or `[Pn]` label, and nothing planned is described as shipped.
+
+## Style
+
+- Private modules with an explicitly exported public API; internals are `pub(crate)`. Name modules for what
+  they own, not `utils` or `common`.
+- On enums defined in this workspace, list every variant instead of `_ =>`, so a new variant flags every site
+  that must handle it. `_` is fine for strings, chars and numbers. Treat existing enum wildcards as debt:
+  replace one when you edit its function.
+- No opaque positional `bool`/`Option` parameters (`foo(false)` is unreadable). Prefer enums or named methods.
+- Don't add trivial wrappers that only rename a call. Extracting a named step from a long function is fine.
+- New traits need concise doc comments explaining their role and what implementations must guarantee.
 
 ## Tests
 
-- Prefer whole-object equality comparisons over field-by-field checks.
-- Do not add tests for statically defined values.
-- Do not add negative tests for logic that was removed.
-- Bug fixes need a regression test that fails without the fix.
-- Tests must wait for observable readiness, not fixed sleeps or retry-to-green loops. If a test must be disabled, give a reason at the test. Use isolated ports and temporary paths, and restore shared state. Run focused tests when changing their behavior.
+- Bug fixes need a regression test that fails without the fix, usually a `tests/cases/*.gly` case (it runs
+  both backends) or a red-team case.
+- Prefer whole-object equality over field-by-field checks. Don't add tests for statically defined values.
+- Don't add negative tests for removed logic, unless the removal is a soundness or authority property (an
+  escape hatch, `Any`, a guard rule). Those get a red-team case.
+- Tests are offline. `glyph fix` tests use `--candidate` and never call the model API. Use temporary paths
+  (`CARGO_TARGET_TMPDIR`), restore shared state, and wait on observable events, not fixed sleeps.
+
+## Repository
+
+- **Never set git identity** (`user.name`/`user.email`, `-c`, `GIT_AUTHOR_*`/`GIT_COMMITTER_*`). Commits
+  carry the ambient git config's identity. Push and open PRs as the active `gh` account.
+- **Never add `Co-authored-by` trailers**, in commits, squash messages or credit for merged work, even
+  when a tool adds one by default. They misattribute commits to unrelated GitHub accounts.
+- Open PRs with [`.github/pull_request_template.md`](.github/pull_request_template.md).
