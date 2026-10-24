@@ -1,0 +1,6 @@
+# sleep with a negative time is an error, the same way in every backend.
+fn main() uses io, time {
+  sleep(0)
+  print("slept 0 ms")
+  sleep(-5)
+}

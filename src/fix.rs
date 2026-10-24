@@ -456,7 +456,7 @@ Glyph in brief:
 - `fn name(a: Int, b: List[Str]) -> Int uses io, fs requires <cond> ensures <cond> { ... }`. \
 Types: Int, Str, Bool, Unit, List[T], Any. A function without `->` returns Unit.
 - `uses` lists the function's effects: io (print, input), fs (read_file, write_file), \
-time (now), rand (random). Calling a function counts as performing its effects. \
+time (now, sleep), rand (random). Calling a function counts as performing its effects. \
 `requires`/`ensures` are contracts; `result` is the return value inside `ensures`; contracts must be pure.
 - Statements: `let x = e`, `let xs: List[Int] = []`, `x = e`, `if c { } else if c { } else { }`, \
 `while c { }`, `for x in list_or_string { }`, `return e`, `assert c`. No semicolons, no `break`/`continue`.

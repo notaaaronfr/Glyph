@@ -54,6 +54,6 @@ A human reviewer doesn't need to read 500 lines. They read the signatures, which
 
 **The north star: Glyph OS.** An operating system where effects aren't just checked by the compiler but enforced by the kernel. An app declared `uses net, io` would be unable to read your files, because the system grants exactly what the signature states. Permissions become part of the code, verifiable before anything runs. Oberon, Singularity and Midori showed that a language and an OS designed together can be safer than either alone. Glyph aims to bring that idea to the AI era.
 
-The first step is done: since v0.9, Glyph programs boot and run on bare metal (`--target kernel`), and the compiler already refuses effects the hardware target can't provide. Since v0.10 the kernel also protects memory with the MMU. Next come interrupts, drivers, and running several programs with their effects enforced as permissions.
+The first step is done: since v0.9, Glyph programs boot and run on bare metal (`--target kernel`), and the compiler already refuses effects the hardware target can't provide. Since v0.10 the kernel also protects memory with the MMU, and since v0.11 it is driven by interrupts. Next come running several programs at once, drivers, and effects enforced as permissions for each program.
 
 The path there is long, and every step makes Glyph useful on its own. If this vision resonates with you, [come build it](CONTRIBUTING.md).

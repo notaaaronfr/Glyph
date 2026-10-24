@@ -23,6 +23,7 @@
 
 void tn_kernel_main(void);
 void tn_kernel_boot(void);
+void tn_kernel_irq(void);
 void tn_kernel_trap(uint64_t kind, uint64_t esr, uint64_t elr, uint64_t far);
 
 __asm__(
@@ -57,11 +58,72 @@ __asm__(
      * handler on a fresh stack. */
     ".balign 2048\n"
     "tn_vectors:\n"
-    ".irp i, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15\n"
+    ".irp i, 0, 1, 2, 3, 4\n"
     "    .balign 128\n"
     "    mov x0, #\\i\n"
     "    b tn_trap_entry\n"
     ".endr\n"
+    /* Entry 5: an interrupt while the kernel runs (current EL, SP_EL1). */
+    "    .balign 128\n"
+    "    b tn_irq_entry\n"
+    ".irp i, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15\n"
+    "    .balign 128\n"
+    "    mov x0, #\\i\n"
+    "    b tn_trap_entry\n"
+    ".endr\n"
+    /* Interrupts can arrive anywhere, so save every register the C handler may
+     * change (the caller-saved general and SIMD registers), then return with eret. */
+    "tn_irq_entry:\n"
+    "    sub sp, sp, #560\n"
+    "    stp x0, x1, [sp, #0]\n"
+    "    stp x2, x3, [sp, #16]\n"
+    "    stp x4, x5, [sp, #32]\n"
+    "    stp x6, x7, [sp, #48]\n"
+    "    stp x8, x9, [sp, #64]\n"
+    "    stp x10, x11, [sp, #80]\n"
+    "    stp x12, x13, [sp, #96]\n"
+    "    stp x14, x15, [sp, #112]\n"
+    "    stp x16, x17, [sp, #128]\n"
+    "    stp x18, x29, [sp, #144]\n"
+    "    str x30, [sp, #160]\n"
+    "    stp q0, q1, [sp, #176]\n"
+    "    stp q2, q3, [sp, #208]\n"
+    "    stp q4, q5, [sp, #240]\n"
+    "    stp q6, q7, [sp, #272]\n"
+    "    stp q16, q17, [sp, #304]\n"
+    "    stp q18, q19, [sp, #336]\n"
+    "    stp q20, q21, [sp, #368]\n"
+    "    stp q22, q23, [sp, #400]\n"
+    "    stp q24, q25, [sp, #432]\n"
+    "    stp q26, q27, [sp, #464]\n"
+    "    stp q28, q29, [sp, #496]\n"
+    "    stp q30, q31, [sp, #528]\n"
+    "    bl tn_kernel_irq\n"
+    "    ldp q30, q31, [sp, #528]\n"
+    "    ldp q28, q29, [sp, #496]\n"
+    "    ldp q26, q27, [sp, #464]\n"
+    "    ldp q24, q25, [sp, #432]\n"
+    "    ldp q22, q23, [sp, #400]\n"
+    "    ldp q20, q21, [sp, #368]\n"
+    "    ldp q18, q19, [sp, #336]\n"
+    "    ldp q16, q17, [sp, #304]\n"
+    "    ldp q6, q7, [sp, #272]\n"
+    "    ldp q4, q5, [sp, #240]\n"
+    "    ldp q2, q3, [sp, #208]\n"
+    "    ldp q0, q1, [sp, #176]\n"
+    "    ldr x30, [sp, #160]\n"
+    "    ldp x18, x29, [sp, #144]\n"
+    "    ldp x16, x17, [sp, #128]\n"
+    "    ldp x14, x15, [sp, #112]\n"
+    "    ldp x12, x13, [sp, #96]\n"
+    "    ldp x10, x11, [sp, #80]\n"
+    "    ldp x8, x9, [sp, #64]\n"
+    "    ldp x6, x7, [sp, #48]\n"
+    "    ldp x4, x5, [sp, #32]\n"
+    "    ldp x2, x3, [sp, #16]\n"
+    "    ldp x0, x1, [sp, #0]\n"
+    "    add sp, sp, #560\n"
+    "    eret\n"
     "tn_trap_entry:\n"
     "    mrs x1, esr_el1\n"
     "    mrs x2, elr_el1\n"
@@ -292,10 +354,40 @@ static void tn_uart_putc(char c) {
     TN_UART[0] = (uint32_t)(unsigned char)c;
 }
 
-static int tn_uart_getc(void) {
-    while (TN_UART[TN_UART_FR] & TN_UART_RXFE) {
+/* Typed characters, filled by the serial port's interrupt. */
+static volatile char tn_rx[256];
+static volatile uint32_t tn_rx_head, tn_rx_tail;
+
+/* Moves characters waiting in the serial port into tn_rx. */
+static void tn_uart_drain(void) {
+    while (!(TN_UART[TN_UART_FR] & TN_UART_RXFE)) {
+        char c = (char)(TN_UART[0] & 0xff);
+        if (tn_rx_head - tn_rx_tail < sizeof tn_rx) {
+            tn_rx[tn_rx_head % sizeof tn_rx] = c;
+            tn_rx_head++;
+        }
     }
-    return (int)(TN_UART[0] & 0xff);
+}
+
+static inline void tn_irqs_off(void) { __asm__ volatile("msr daifset, #2" ::: "memory"); }
+static inline void tn_irqs_on(void) { __asm__ volatile("msr daifclr, #2" ::: "memory"); }
+
+/* Waits for the next typed character, sleeping (wfi) until an interrupt arrives.
+ * Interrupts are masked while checking, so one can't slip in between the check and
+ * the wfi; a pending interrupt still wakes wfi, and is taken once unmasked. */
+static int tn_uart_getc(void) {
+    for (;;) {
+        tn_irqs_off();
+        tn_uart_drain(); /* also catches a character whose interrupt was missed */
+        if (tn_rx_head != tn_rx_tail) {
+            char c = tn_rx[tn_rx_tail % sizeof tn_rx];
+            tn_rx_tail++;
+            tn_irqs_on();
+            return (unsigned char)c;
+        }
+        __asm__ volatile("wfi");
+        tn_irqs_on();
+    }
 }
 
 /* Standard output and errors both go to the serial port. */
@@ -324,6 +416,13 @@ static uint64_t tn_tick_freq(void) {
     uint64_t f;
     __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
     return f;
+}
+
+/* Sleeps until `ms` milliseconds have passed. The CPU idles in wfi and wakes on each
+ * timer tick (every 10 ms), so the wake-up can be up to one tick late. */
+static void tn_sleep_ms(int64_t ms) {
+    uint64_t end = tn_ticks() + (uint64_t)ms * (tn_tick_freq() / 1000);
+    while (tn_ticks() < end) __asm__ volatile("wfi");
 }
 
 /* Stops the machine. Under QEMU (with semihosting enabled) the exit code becomes
@@ -476,10 +575,55 @@ static void tn_selftest(int which) {
 }
 #endif
 
+/* ---- interrupts: the GICv2 interrupt controller, the timer, the serial port ---- */
+
+#define TN_GICD ((volatile uint32_t *)0x08000000)   /* distributor */
+#define TN_GICD8 ((volatile uint8_t *)0x08000000)
+#define TN_GICC ((volatile uint32_t *)0x08010000)   /* CPU interface */
+#define TN_IRQ_TIMER 27                             /* EL1 virtual timer (a PPI) */
+#define TN_IRQ_UART 33                              /* PL011 serial port (SPI 1) */
+#define TN_HZ 100                                   /* timer ticks per second */
+
+static volatile uint64_t tn_irq_ticks; /* timer interrupts handled */
+
+static void tn_timer_arm(void) {
+    uint64_t interval = tn_tick_freq() / TN_HZ;
+    __asm__ volatile("msr cntv_tval_el0, %0\nmsr cntv_ctl_el0, %1\nisb" : : "r"(interval), "r"(1ULL));
+}
+
+void tn_kernel_irq(void) {
+    uint32_t iar = TN_GICC[0x00c / 4]; /* acknowledge */
+    uint32_t id = iar & 0x3ff;
+    if (id == TN_IRQ_TIMER) {
+        tn_irq_ticks++;
+        tn_timer_arm();
+    } else if (id == TN_IRQ_UART) {
+        /* Reading a character clears its interrupt. (Clearing it by hand afterwards
+         * would race with a character arriving just then, losing its interrupt.) */
+        tn_uart_drain();
+    }
+    if (id < 1020) TN_GICC[0x010 / 4] = iar; /* end of interrupt */
+}
+
+static void tn_interrupts_on(void) {
+    TN_GICD[0x000 / 4] = 1;                                  /* distributor on */
+    TN_GICD[0x100 / 4] = 1u << TN_IRQ_TIMER;                 /* enable the timer PPI */
+    TN_GICD[0x104 / 4] = 1u << (TN_IRQ_UART - 32);           /* enable the UART SPI */
+    TN_GICD8[0x400 + TN_IRQ_TIMER] = 0x80;                   /* priorities */
+    TN_GICD8[0x400 + TN_IRQ_UART] = 0x80;
+    TN_GICD8[0x800 + TN_IRQ_UART] = 0x01;                    /* deliver to CPU 0 */
+    TN_GICC[0x004 / 4] = 0xff;                               /* accept all priorities */
+    TN_GICC[0x000 / 4] = 1;                                  /* CPU interface on */
+    TN_UART[0x038 / 4] = (1 << 4) | (1 << 6);                /* UART: interrupt on receive */
+    tn_timer_arm();
+    tn_irqs_on();
+}
+
 void tn_kernel_boot(void) {
 #ifndef TN_NO_MMU /* GLYPH_KERNEL_CFLAGS=-DTN_NO_MMU: run without protection or caches */
     tn_mmu_on();
 #endif
+    tn_interrupts_on();
 #ifdef TN_SELFTEST
     tn_selftest(TN_SELFTEST);
 #endif

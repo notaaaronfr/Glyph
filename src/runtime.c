@@ -866,6 +866,21 @@ static void tn_init(void) {
 }
 #endif
 
+#ifndef TN_KERNEL
+static void tn_sleep_ms(int64_t ms) {
+    struct timespec ts = {(time_t)(ms / 1000), (long)(ms % 1000) * 1000000L};
+    while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {
+    }
+}
+#endif
+
+static tn_unit tn_sleep(int64_t ms, tn_loc at) {
+    if (ms < 0) tn_fail("runtime", at, "invalid arguments to `sleep`: the time must not be negative", NULL);
+    tn_flush();
+    tn_sleep_ms(ms);
+    return 0;
+}
+
 static int64_t tn_random(int64_t n, tn_loc at) {
     if (n <= 0) tn_fail("runtime", at, "invalid arguments to `random`: the limit must be positive", NULL);
     tn_rng ^= tn_rng << 13;

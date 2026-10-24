@@ -1477,6 +1477,7 @@ impl<'a> Gen<'a> {
             "read_file" => format!("tn_read_file({}, {})", a[0], at),
             "write_file" => format!("tn_write_file({}, {}, {})", a[0], a[1], at),
             "now" => "tn_now()".into(),
+            "sleep" => format!("tn_sleep({}, {})", a[0], at),
             "random" => format!("tn_random({}, {})", a[0], at),
             _ => {
                 return Err(Error::new(

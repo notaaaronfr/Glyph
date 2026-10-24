@@ -317,7 +317,7 @@ fn kernel_boots_and_runs_glyph() {
 #[test]
 fn kernel_shell_reads_the_serial_port() {
     // Bad input must not crash the OS: empty lines, non-numbers, out-of-range values.
-    let input = "fib 20\n\nfib abc\nfib 50\nsum 1 two\nsum 1 2 3\nexit\n";
+    let input = "fib 20\n\nfib abc\nfib 50\nsum 1 two\nsum 1 2 3\nsleep 50\nexit\n";
     let Some(out) = boot("examples/kernel/shell.gly", input) else {
         return;
     };
@@ -325,6 +325,11 @@ fn kernel_shell_reads_the_serial_port() {
     assert!(out.contains("not a number: abc"), "{}", out);
     assert!(out.contains("fib needs a number from 0 to 40"), "{}", out);
     assert!(out.contains("not a number: two"), "{}", out);
+    assert!(
+        out.contains("(the CPU idled until a timer interrupt woke it)"),
+        "{}",
+        out
+    );
     assert!(out.contains("fib(20) = 6765"), "{}", out);
     assert!(out.contains("sum = 6"), "{}", out);
     assert!(out.contains("powering off"), "{}", out);
@@ -384,4 +389,40 @@ fn kernel_memory_protection_catches_faults() {
             out
         );
     }
+}
+
+#[test]
+fn sleep_waits_in_every_backend() {
+    for args in [
+        vec!["run", "tests/kernel/sleep.gly"],
+        vec!["run", "tests/kernel/sleep.gly", "--native"],
+    ] {
+        let out = glyph(&args);
+        assert!(out.starts_with("exit: 0"), "{:?}:\n{}", args, out);
+        assert!(
+            out.contains("slept at least 300 ms: true"),
+            "{:?}:\n{}",
+            args,
+            out
+        );
+        assert!(
+            out.contains("and not much longer: true"),
+            "{:?}:\n{}",
+            args,
+            out
+        );
+    }
+}
+
+/// On the kernel, `sleep` idles the CPU until timer interrupts wake it, so this
+/// only finishes if the interrupt controller and timer work.
+#[test]
+fn kernel_timer_interrupts_wake_sleep() {
+    let Some(out) = boot("tests/kernel/sleep.gly", "") else {
+        return;
+    };
+    assert!(out.starts_with("exit: 0"), "{}", out);
+    assert!(out.contains("tick 3"), "{}", out);
+    assert!(out.contains("slept at least 300 ms: true"), "{}", out);
+    assert!(out.contains("and not much longer: true"), "{}", out);
 }

@@ -181,6 +181,13 @@ The kernel platform ([src/kernel.c](src/kernel.c)) boots the CPU and provides a 
 | Recursing past the end of the stack | `kernel panic: stack overflow` |
 | Jumping into data | `kernel panic: tried to run memory that isn't code` |
 
+**Interrupts drive the kernel.** A hardware timer interrupts 100 times a second, and the serial port interrupts when a key arrives. While a program waits, in `input()` or `sleep(ms)`, the CPU sleeps until the next interrupt instead of spinning. Measured with the shell waiting 3 seconds for input:
+
+| | Host CPU used while waiting |
+|---|---|
+| Polling (v0.10) | 2.68 s of 3 s |
+| Interrupts (v0.11) | 0.03 s of 3 s |
+
 Glyph code itself can't do these things. The protection guards against bugs in the runtime and, later, in drivers and other programs. The tests trigger each fault on purpose with `GLYPH_KERNEL_CFLAGS=-DTN_SELFTEST=1` through `4`.
 
 Separating code from data also made kernel programs about 8 to 15 times faster under QEMU, which re-translates code whenever a page holding code is written. QEMU doesn't model cache timing, so the effect of turning the caches on only shows on real hardware. Everything else is ordinary Glyph: records, enums, generics, modules, contracts, and the same reference-counted memory management. Errors show the same messages and source lines as on a desktop.
@@ -223,7 +230,7 @@ GLYPH_MEMSTATS=1 glyph run app.gly --native
 # glyph memstats: 1415650 allocated, 1415650 freed, 0 live at exit, peak 40023 live
 ```
 
-## Language reference (v0.10)
+## Language reference (v0.11)
 
 | Feature | Syntax |
 |---|---|
@@ -238,9 +245,9 @@ GLYPH_MEMSTATS=1 glyph run app.gly --native
 | Variables | `let x = 1`, `let xs: List[Int] = []`, `x = x + 1` |
 | Control flow | `if / else if / else`, `while`, `for x in list_or_string`, `return` |
 | Operators | `+ - * / %`, `== != < <= > >=`, `and or not`, `xs[i]` |
-| Effects | `io` (terminal), `fs` (files), `time` (clock), `rand` (randomness) |
+| Effects | `io` (terminal), `fs` (files), `time` (clock, sleeping), `rand` (randomness) |
 | Pure built-ins | `len str int abs push range join split contains`, `parse_int` (returns `Option[Int]` instead of crashing) |
-| Effectful built-ins | `print input` (io), `read_file write_file` (fs), `now` (time), `random` (rand) |
+| Effectful built-ins | `print input` (io), `read_file write_file` (fs), `now sleep` (time), `random` (rand) |
 
 Contracts must be pure, and `ensures` sees the arguments as they were passed in, even if the body reassigns them. Comments start with `#`. There are no semicolons; newlines separate statements.
 
@@ -324,7 +331,8 @@ Glyph is **early and experimental**: expect breaking changes.
 - [ ] Editor support (LSP), package manager
 - [x] Glyph runs on bare metal (`--target kernel`): boots in QEMU, serial I/O, timer, kernel heap
 - [x] Memory protection on the kernel: MMU, caches, read-only code, no-execute data, null and stack guards
-- [ ] Glyph OS next steps: interrupts and a timer tick, a device driver interface, multiple programs with effects enforced as permissions
+- [x] Interrupts on the kernel: GIC, 100 Hz timer tick, interrupt-driven serial input, `sleep` that idles the CPU
+- [ ] Glyph OS next steps: running several programs (tasks and a scheduler), a device driver interface, effects enforced as permissions per program
 - [ ] The north star: **Glyph OS**, where the kernel enforces effects as permissions
 
 See [VISION.md](VISION.md) for the full picture.

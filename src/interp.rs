@@ -695,6 +695,16 @@ impl<'a> Interp<'a> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or(0)),
+            ("sleep", [Int(ms)]) if *ms < 0 => {
+                return Err(rt(
+                    "invalid arguments to `sleep`: the time must not be negative".into(),
+                ))
+            }
+            ("sleep", [Int(ms)]) => {
+                let _ = std::io::stdout().flush();
+                std::thread::sleep(std::time::Duration::from_millis(*ms as u64));
+                Unit
+            }
             ("random", [Int(n)]) if *n <= 0 => {
                 return Err(rt(
                     "invalid arguments to `random`: the limit must be positive".into(),

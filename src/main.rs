@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
 
 const USAGE: &str = "\
-Glyph 0.10 - a language AI can write and humans can trust
+Glyph 0.11 - a language AI can write and humans can trust
 
 usage: glyph <command> <file.gly> [options]
 
@@ -458,7 +458,7 @@ fn qemu(kernel: &Path) -> Command {
     let mut cmd = Command::new(bin);
     cmd.args([
         "-M",
-        "virt",
+        "virt,gic-version=2",
         "-cpu",
         "cortex-a72",
         "-m",

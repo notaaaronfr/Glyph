@@ -1,0 +1,7 @@
+exit: 1
+--- stdout ---
+slept 0 ms
+--- stderr ---
+tests/cases/sleep_negative.gly:5:3: runtime error: invalid arguments to `sleep`: the time must not be negative
+5 |   sleep(-5)
+  |   ^

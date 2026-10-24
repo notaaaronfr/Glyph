@@ -23,6 +23,7 @@ pub fn builtin(name: &str) -> Option<(usize, Option<usize>, Option<&'static str>
         "read_file" => (1, Some(1), Some("fs")),
         "write_file" => (2, Some(2), Some("fs")),
         "now" => (0, Some(0), Some("time")),
+        "sleep" => (1, Some(1), Some("time")),
         "random" => (1, Some(1), Some("rand")),
         "len" | "str" | "int" | "abs" | "parse_int" => (1, Some(1), None),
         "push" | "join" | "split" | "contains" => (2, Some(2), None),
@@ -1167,6 +1168,10 @@ impl<'a> Checker<'a> {
                 Unit
             }
             "now" => Int,
+            "sleep" => {
+                self.expect(&args[0], &Int, &arg(0));
+                Unit
+            }
             _ => unreachable!("builtin `{}` has no type rule", name),
         }
     }

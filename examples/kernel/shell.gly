@@ -7,6 +7,7 @@ enum Command {
   Echo { text: Str }
   Fib { n: Int }
   Uptime
+  Sleep { ms: Int }
   Sum { numbers: List[Int] }
   Exit
   Nothing
@@ -38,6 +39,16 @@ fn parse(line: Str) -> Command {
       None => { return Invalid { message: "not a number: " + rest[0] } }
     }
   }
+  if cmd == "sleep" {
+    if len(rest) != 1 { return Invalid { message: "usage: sleep <milliseconds>" } }
+    match parse_int(rest[0]) {
+      Some { value } => {
+        if value < 0 or value > 60000 { return Invalid { message: "sleep takes 0 to 60000 ms" } }
+        return Sleep { ms: value }
+      }
+      None => { return Invalid { message: "not a number: " + rest[0] } }
+    }
+  }
   if cmd == "sum" {
     let nums: List[Int] = []
     for w in rest {
@@ -64,10 +75,15 @@ fn main() uses io, time {
   while running {
     let line = input("glyph> ")
     match parse(line) {
-      Help => { print("commands: help, echo <text>, fib <n>, sum <numbers...>, uptime, exit") }
+      Help => { print("commands: help, echo <text>, fib <n>, sum <numbers...>, sleep <ms>, uptime, exit") }
       Echo { text } => { print(text) }
       Fib { n } => { print("fib(" + str(n) + ") =", fib(n)) }
       Uptime => { print("up for", now(), "ms") }
+      Sleep { ms } => {
+        let before = now()
+        sleep(ms)
+        print("slept", now() - before, "ms (the CPU idled until a timer interrupt woke it)")
+      }
       Sum { numbers } => {
         let total = 0
         for x in numbers { total = total + x }

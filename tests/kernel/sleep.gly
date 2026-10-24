@@ -1,0 +1,12 @@
+# sleep(ms): on the kernel the CPU idles until timer interrupts wake it,
+# so this only finishes if interrupts work.
+fn main() uses io, time {
+  let start = now()
+  for i in range(3) {
+    sleep(100)
+    print("tick", i + 1)
+  }
+  let elapsed = now() - start
+  print("slept at least 300 ms:", elapsed >= 300)
+  print("and not much longer:", elapsed < 1000)
+}
